@@ -239,7 +239,11 @@ public class OspreyBlibReader {
                  ResultSet rs = st.executeQuery("SELECT * FROM RefSpectra")) {
 
                 // DIA-NN-style header (see PSMConfig.use_osprey_blib_column_names()).
-                w.write("File.Name\tStripped.Sequence\tModified.Sequence\tPrecursor.Charge\t"
+                // Precursor.Id (Modified.Sequence + Precursor.Charge) is required by the
+                // multi-run merge in AIGear.get_ms_file2psm_diann_multiple_ms_runs; without it,
+                // folder (multi-mzML) training NPEs on hIndex.get("Precursor.Id"). Match the
+                // exact format Carafe's Skyline->DIA-NN converter emits (modifiedSequence + charge).
+                w.write("Precursor.Id\tFile.Name\tStripped.Sequence\tModified.Sequence\tPrecursor.Charge\t"
                         + "Precursor.MZ\tRT\tRT.Start\tRT.Stop\tIM\tMS2.Scan\tQ.Value\tPEP\n");
 
                 while (rs.next()) {
@@ -269,9 +273,13 @@ public class OspreyBlibReader {
                         continue;
                     }
 
+                    // Precursor.Id = Modified.Sequence + Precursor.Charge (no separator), the same
+                    // key AIGear's Skyline->DIA-NN converter builds (e.g. AAC(UniMod:4)LLDGVPVALKK3).
+                    String precursorId = modSeq + charge;
+
                     // Q.Value/PEP are 0: Osprey already FDR-filtered its output, so every row is
                     // a confident identification for finetuning.
-                    w.write(fileName + "\t" + peptide + "\t" + modSeq + "\t" + charge + "\t"
+                    w.write(precursorId + "\t" + fileName + "\t" + peptide + "\t" + modSeq + "\t" + charge + "\t"
                             + precursorMz + "\t" + rt + "\t" + rtStart + "\t" + rtStop + "\t"
                             + im + "\t0\t0\t0\n");
                     nRows++;

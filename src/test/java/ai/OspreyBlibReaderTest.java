@@ -96,11 +96,42 @@ public class OspreyBlibReaderTest {
         List<Map<String, String>> rows = readTsv(tsv);
 
         Assert.assertEquals(rows.size(), 3, "three identifications expected");
-        // DIA-NN-style columns must be present.
+        // DIA-NN-style columns must be present. Precursor.Id is required by the multi-run merge
+        // (AIGear.get_ms_file2psm_diann_multiple_ms_runs) that folder training goes through.
         Map<String, String> any = rows.get(0);
-        for (String col : new String[] { "File.Name", "Stripped.Sequence", "Modified.Sequence",
-                "Precursor.Charge", "Precursor.MZ", "RT", "RT.Start", "RT.Stop", "Q.Value" }) {
+        for (String col : new String[] { "Precursor.Id", "File.Name", "Stripped.Sequence",
+                "Modified.Sequence", "Precursor.Charge", "Precursor.MZ", "RT", "RT.Start",
+                "RT.Stop", "Q.Value" }) {
             Assert.assertTrue(any.containsKey(col), "missing column " + col);
+        }
+    }
+
+    @Test
+    public void emitsPrecursorIdAsModifiedSequencePlusCharge() throws Exception {
+        // Regression: the Osprey report initially omitted Precursor.Id, so multi-mzML (folder)
+        // finetuning NPE'd in the "best" merge (hIndex.get("Precursor.Id") -> null). Precursor.Id
+        // must be present and equal Modified.Sequence + Precursor.Charge, matching the key
+        // AIGear's Skyline->DIA-NN converter builds so both report sources merge identically.
+        Path blib = Files.createTempFile("osprey_test", ".blib");
+        Files.deleteIfExists(blib);
+        buildBlib(blib);
+        Path outDir = Files.createTempDirectory("osprey_out");
+
+        String tsv = OspreyBlibReader.convertBlibToDiannTsv(blib.toString(), outDir.toString());
+        Map<String, Map<String, String>> byPep = byPeptide(readTsv(tsv));
+
+        // Unmodified, charge 2.
+        Assert.assertEquals(byPep.get("PEPTIDEK").get("Precursor.Id"), "PEPTIDEK2");
+        // Carbamidomethyl C, charge 2: the UniMod token is carried into the id.
+        Assert.assertEquals(byPep.get("PEPTCDEK").get("Precursor.Id"), "PEPTC(UniMod:4)DEK2");
+        // Oxidation M, charge 3.
+        Assert.assertEquals(byPep.get("PEMTIDEK").get("Precursor.Id"), "PEM(UniMod:35)TIDEK3");
+
+        // And the id is exactly Modified.Sequence + Precursor.Charge for every row.
+        for (Map<String, String> r : byPep.values()) {
+            Assert.assertEquals(r.get("Precursor.Id"),
+                    r.get("Modified.Sequence") + r.get("Precursor.Charge"),
+                    "Precursor.Id must be Modified.Sequence + Precursor.Charge");
         }
     }
 
