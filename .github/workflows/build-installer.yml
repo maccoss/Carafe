@@ -98,6 +98,11 @@ jobs:
           v=$(mvn -q -B help:evaluate -Dexpression=project.version -DforceStdout)
           echo "CARAFE_VERSION=$v" >> "$GITHUB_ENV"
           echo "Resolved Carafe version: $v"
+          # yyMMdd build stamp so the many test installers are distinguishable
+          # (e.g. Carafe-2.2.0-260701.msi, artifact Carafe-win-x64-msi-260701).
+          d=$(date +%y%m%d)
+          echo "BUILD_DATE=$d" >> "$GITHUB_ENV"
+          echo "Build date stamp: $d"
 
       # Osprey is public (ProteoWizard/pwiz). Sparse-checkout only what the
       # build touches: the Osprey subtree, the shared PortableUtil project,
@@ -146,10 +151,23 @@ jobs:
           APP_VERSION: ${{ env.CARAFE_VERSION }}
         run: scripts\generate_installer_win.bat
 
+      # jpackage names the MSI <App>-<version>.msi (version must be numeric, so the
+      # date can't go through --app-version). Append the yyMMdd stamp here instead,
+      # e.g. Carafe-2.2.0.msi -> Carafe-2.2.0-260701.msi. The later steps glob
+      # target/installer/*.msi, so they pick up the renamed file.
+      - name: Date-stamp the MSI
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem target/installer/*.msi | Select-Object -First 1
+          if (-not $msi) { Write-Error 'No MSI found to rename'; exit 1 }
+          $dated = "$($msi.BaseName)-$env:BUILD_DATE$($msi.Extension)"
+          Rename-Item -Path $msi.FullName -NewName $dated
+          Write-Host "Renamed MSI to $dated"
+
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v6
         with:
-          name: Carafe-${{ env.RID }}-msi
+          name: Carafe-${{ env.RID }}-msi-${{ env.BUILD_DATE }}
           path: target/installer/*.msi
           if-no-files-found: error
 
