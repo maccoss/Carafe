@@ -8166,25 +8166,7 @@ public class AIGear {
      */
     public String add_ms2spectrum_index(String psm_file, String ms_file) throws IOException {
         ConcurrentHashMap<Integer, ApexMatch> row2index = new ConcurrentHashMap<>();
-        // only need to save information from MS2 spectra
-        // index -> rt and isolation_mz
-        // Extract MS2 spectra index and MS2 spectra RT and isolation win from mzML.
-        // TreeMap so iteration is by MS2 ordinal (= RT-ascending), which ApexMatcher relies on for
-        // its early-exit to be sound.
-        java.util.TreeMap<Integer, HashMap<String, Double>> index = new java.util.TreeMap<>();
-        DIAMeta meta = new DIAMeta();
-        meta.load_ms_data(ms_file);
-        int global_index = 0;
-        for (int scan_num : meta.num2scanMap.keySet()) {
-            if (meta.num2scanMap.get(scan_num).getMsLevel() == 2) {
-                index.put(global_index, new HashMap<>());
-                index.get(global_index).put("rt", meta.num2scanMap.get(scan_num).getRt());
-                index.get(global_index).put("scan_number", (double) scan_num);
-                index.get(global_index).put("isolation_mz_start",meta.num2scanMap.get(scan_num).getPrecursor().getMzRangeStart());
-                index.get(global_index).put("isolation_mz_end",meta.num2scanMap.get(scan_num).getPrecursor().getMzRangeEnd());
-                global_index++;
-            }
-        }
+
         File F = new File(psm_file);
         String out_prefix = F.getName();
         if (out_prefix.endsWith(".csv")) {
@@ -8215,8 +8197,35 @@ public class AIGear {
 
         }
         psmReader.close();
+
+        // Resolve each PSM row's MS run file, then build ONE MS2 spectrum index PER run file.
+        // -ms may be a single MS file OR a folder of files (e.g. gas-phase fractionation), so a
+        // row's run is identified by its File.Name column and resolved against the folder
+        // (resolveRunMsFile, mirroring the DIA-NN loader). Building a single index straight from
+        // ms_file broke the folder case: the directory was opened as one mzML and fetchIndex()
+        // failed, then DIAMeta.load_ms_data NPE'd on a null index.
+        boolean hasFileCol = cIndex.containsKey(PSMConfig.ms_file_column_name);
+        int fileColIdx = hasFileCol ? cIndex.get(PSMConfig.ms_file_column_name) : -1;
+        String[] rowFile = new String[matches.size()];
+        for (int k = 0; k < matches.size(); k++) {
+            String fileNameCell = null;
+            if (hasFileCol) {
+                String[] d = matches.get(k).split("\t");
+                if (fileColIdx < d.length) {
+                    fileNameCell = d[fileColIdx];
+                }
+            }
+            rowFile[k] = resolveRunMsFile(fileNameCell, ms_file);
+        }
+        java.util.Map<String, java.util.TreeMap<Integer, HashMap<String, Double>>> file2index =
+                new java.util.HashMap<>();
+        for (String runFile : new java.util.LinkedHashSet<>(java.util.Arrays.asList(rowFile))) {
+            file2index.put(runFile, buildMs2Index(runFile));
+        }
+
         DBGear dbGear = new DBGear();
         IntStream.range(0, matches.size()).parallel().forEach(k -> {
+            java.util.TreeMap<Integer, HashMap<String, Double>> index = file2index.get(rowFile[k]);
             String[] d = matches.get(k).split("\t");
             double rt = Double.parseDouble(d[cIndex.get(PSMConfig.rt_column_name)]);
             double precursor_mz;
@@ -8244,6 +8253,8 @@ public class AIGear {
                     apexMatch.apex_rt = index.get(matched_index).get("rt");
                     apexMatch.delta_rt = index.get(matched_index).get("rt") - rt;
                     apexMatch.scan_number = index.get(matched_index).get("scan_number").intValue();
+                    apexMatch.isolation_mz_start = index.get(matched_index).get("isolation_mz_start");
+                    apexMatch.isolation_mz_end = index.get(matched_index).get("isolation_mz_end");
                     row2index.put(k, apexMatch);
                 } else {
                     System.out.println("No apex scan found: " + matches.get(k));
@@ -8258,10 +8269,11 @@ public class AIGear {
 
         IntStream.range(0, matches.size()).forEach(k -> {
             try {
+                ApexMatch am = row2index.get(k);
                 if(!cIndex.containsKey(PSMConfig.qvalue_column_name)){
-                    writer.write(matches.get(k)+"\t0\t"+row2index.get(k).apex_rt+"\t"+row2index.get(k).delta_rt+"\t"+row2index.get(k).ms2index+"\t"+row2index.get(k).scan_number+"\t"+index.get(row2index.get(k).ms2index).get("isolation_mz_start")+"\t"+index.get(row2index.get(k).ms2index).get("isolation_mz_end")+"\n");
+                    writer.write(matches.get(k)+"\t0\t"+am.apex_rt+"\t"+am.delta_rt+"\t"+am.ms2index+"\t"+am.scan_number+"\t"+am.isolation_mz_start+"\t"+am.isolation_mz_end+"\n");
                 }else{
-                    writer.write(matches.get(k)+"\t"+row2index.get(k).apex_rt+"\t"+row2index.get(k).delta_rt+"\t"+row2index.get(k).ms2index+"\t"+row2index.get(k).scan_number+"\t"+index.get(row2index.get(k).ms2index).get("isolation_mz_start")+"\t"+index.get(row2index.get(k).ms2index).get("isolation_mz_end")+"\n");
+                    writer.write(matches.get(k)+"\t"+am.apex_rt+"\t"+am.delta_rt+"\t"+am.ms2index+"\t"+am.scan_number+"\t"+am.isolation_mz_start+"\t"+am.isolation_mz_end+"\n");
                 }
             } catch (IOException e) {
                 throw new RuntimeException(e);
@@ -8270,6 +8282,66 @@ public class AIGear {
         writer.close();
         PSMConfig.rt_column_name = "apex_rt";
         return (out_file);
+    }
+
+    /**
+     * Resolve the MS run file for a PSM row. Mirrors the DIA-NN multi-file resolution: use the
+     * row's File.Name value if it points to an existing file; otherwise, if {@code msArg} is a
+     * single file use it; otherwise treat {@code msArg} as a folder and resolve the run by its
+     * base name inside that folder. Throws {@link IllegalArgumentException} when the run cannot
+     * be located, so a multi-file finetune fails with a clear message instead of opening a
+     * directory as an mzML (which previously NPE'd in {@code DIAMeta.load_ms_data}).
+     *
+     * @param fileNameCell the row's File.Name value (may be null when there is no such column)
+     * @param msArg        the -ms argument: a single MS file or a folder of MS files
+     * @return the resolved, existing MS file path
+     */
+    public static String resolveRunMsFile(String fileNameCell, String msArg) {
+        if (fileNameCell != null && !fileNameCell.isEmpty()) {
+            File direct = new File(fileNameCell);
+            if (direct.isFile()) {
+                return fileNameCell;
+            }
+        }
+        File ms = new File(msArg);
+        if (ms.isFile()) {
+            return msArg;
+        }
+        if (fileNameCell != null && !fileNameCell.isEmpty()) {
+            String base = java.nio.file.Paths.get(fileNameCell).getFileName().toString();
+            File resolved = new File(msArg, base);
+            if (resolved.isFile()) {
+                return resolved.getPath();
+            }
+            throw new IllegalArgumentException("Training MS file not found for run '" + fileNameCell
+                    + "': looked for '" + resolved.getPath() + "'. Pass -ms as that file or the folder containing it.");
+        }
+        throw new IllegalArgumentException("Cannot resolve training MS file: -ms '" + msArg
+                + "' is not a file and the identification table has no " + PSMConfig.ms_file_column_name + " column.");
+    }
+
+    /**
+     * Build the MS2 spectrum index (MS2 ordinal -&gt; rt / scan_number / isolation window) for a
+     * single MS file. Extracted from {@link #add_ms2spectrum_index} so each run file in a
+     * multi-file (folder) finetune gets its own index. TreeMap keeps MS2 ordinals RT-ascending,
+     * which ApexMatcher's early-exit relies on.
+     */
+    private static java.util.TreeMap<Integer, HashMap<String, Double>> buildMs2Index(String ms_file) {
+        java.util.TreeMap<Integer, HashMap<String, Double>> index = new java.util.TreeMap<>();
+        DIAMeta meta = new DIAMeta();
+        meta.load_ms_data(ms_file);
+        int global_index = 0;
+        for (int scan_num : meta.num2scanMap.keySet()) {
+            if (meta.num2scanMap.get(scan_num).getMsLevel() == 2) {
+                index.put(global_index, new HashMap<>());
+                index.get(global_index).put("rt", meta.num2scanMap.get(scan_num).getRt());
+                index.get(global_index).put("scan_number", (double) scan_num);
+                index.get(global_index).put("isolation_mz_start", meta.num2scanMap.get(scan_num).getPrecursor().getMzRangeStart());
+                index.get(global_index).put("isolation_mz_end", meta.num2scanMap.get(scan_num).getPrecursor().getMzRangeEnd());
+                global_index++;
+            }
+        }
+        return index;
     }
 
     /**
