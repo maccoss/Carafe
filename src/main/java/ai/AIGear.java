@@ -34,6 +34,7 @@ import com.jerolba.carpet.CarpetReader;
 
 import main.java.db.DBGear;
 import main.java.db.EntrapmentFastaGear;
+import main.java.db.PairingManifestReconciler;
 import main.java.koina.KoinaLibraryGenerator;
 import main.java.dia.*;
 import main.java.input.*;
@@ -716,6 +717,10 @@ public class AIGear {
         options.addOption("entrapment_seed", true, "Master RNG seed for entrapment shuffling, default is 42.");
         options.addOption("decoy_seed", true, "Master RNG seed for decoy shuffling, default is 24.");
 
+        // Reconcile a pairing manifest against the library actually predicted from its FASTA.
+        options.addOption("reconcile_manifest", true, "Reconcile the -manifest pairing manifest against the -predicted_library spectral library and write the pruned manifest (describing exactly the searched library) to the given path.");
+        options.addOption("predicted_library", true, "Predicted spectral library TSV (carafe_spectral_library.tsv) used by -reconcile_manifest.");
+
         // Koina-based initial library generation (for the Osprey workflow).
         options.addOption("build_koina_library", true, "Generate an initial DIA-NN-format spectral library from the -db peptide FASTA using the Koina prediction service, writing it to the given TSV path. Use with -koina_ms2_model and -koina_rt_model.");
         options.addOption("koina_url", true, "Koina server base URL (default https://koina.wilhelmlab.org).");
@@ -933,6 +938,26 @@ public class AIGear {
             }
             EntrapmentFastaGear.run(efc);
             Cloger.getInstance().logger.info("Entrapment FASTA build finished in "
+                    + (System.currentTimeMillis() - startTime) / 1000 + " s.");
+            return;
+        }
+
+        // Reconcile-manifest mode: prune a pairing manifest to the peptides actually present in the
+        // predicted library, so the manifest describes exactly what Osprey/FDRBench will search.
+        if (cmd.hasOption("reconcile_manifest")) {
+            String manifestOut = cmd.getOptionValue("reconcile_manifest");
+            String manifestIn = cmd.getOptionValue("manifest");
+            String predictedLibrary = cmd.getOptionValue("predicted_library");
+            if (manifestIn == null || manifestIn.isEmpty()) {
+                System.err.println("-reconcile_manifest requires the input manifest via -manifest");
+                System.exit(1);
+            }
+            if (predictedLibrary == null || predictedLibrary.isEmpty()) {
+                System.err.println("-reconcile_manifest requires the predicted library TSV via -predicted_library");
+                System.exit(1);
+            }
+            PairingManifestReconciler.run(manifestIn, predictedLibrary, manifestOut);
+            Cloger.getInstance().logger.info("Manifest reconciliation finished in "
                     + (System.currentTimeMillis() - startTime) / 1000 + " s.");
             return;
         }

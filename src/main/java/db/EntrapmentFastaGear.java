@@ -1,7 +1,10 @@
 package main.java.db;
 
 import com.compomics.util.experiment.biology.enzymes.Enzyme;
+import com.compomics.util.experiment.biology.ions.impl.ElementaryIon;
+import com.compomics.util.experiment.biology.proteins.Peptide;
 import main.java.input.CParameter;
+import main.java.input.PeptideUtils;
 import main.java.util.Cloger;
 import net.sf.jfasta.FASTAElement;
 import net.sf.jfasta.FASTAFileReader;
@@ -178,6 +181,34 @@ public class EntrapmentFastaGear {
     }
 
     /**
+     * Modification-aware m/z window test, matching the library-prediction step's per-precursor
+     * filter exactly. Enumerates the same peptidoforms the library does via
+     * {@link PeptideUtils#calcPeptideIsoforms(String)} (fixed modifications always applied, variable
+     * modifications up to {@code maxVarMods}/{@code maxModsPerAA}) and returns true iff at least one
+     * {@code (peptidoform, charge)} precursor m/z lands inside {@code [minMz, maxMz]} — the same
+     * "does this peptide contribute any precursor to the library" test. Uses the identical proton
+     * mass ({@link ElementaryIon#proton}) and compomics-computed modified masses as
+     * {@code AIGear.get_mz}, so a Carbamidomethyl-C peptide is filtered on its +57.02 mass and a
+     * peptide that only qualifies through an Oxidation-M form is retained. The caller must first drop
+     * unknown-residue peptides (via {@link #peptideNeutralMass}) so compomics only sees standard
+     * residues here.
+     */
+    public static boolean fitsMzRangeWithMods(String seq, int[] charges, double minMz, double maxMz) {
+        List<Peptide> peptidoforms = PeptideUtils.calcPeptideIsoforms(seq);
+        double proton = ElementaryIon.proton.getTheoreticMass();
+        for (Peptide form : peptidoforms) {
+            double mass = form.getMass();
+            for (int z : charges) {
+                double mz = (mass + z * proton) / z;
+                if (minMz <= mz && mz <= maxMz) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Deterministically shuffle all but the last residue. The per-peptide RNG seed is derived
      * as SHA-1({@code masterSeed:seq}) so the same (sequence, masterSeed) pair always returns the
      * same shuffle while different sequences get independent shuffles. Length-1 and length-2
@@ -346,13 +377,17 @@ public class EntrapmentFastaGear {
                         existing.add(rec);
                         continue;
                     }
+                    // Drop unknown-residue peptides first (B/Z/J/X/U/O) so the modification-aware m/z
+                    // filter below only hands standard residues to compomics.
                     Double neutralMass = peptideNeutralMass(pep);
                     if (neutralMass == null) {
                         r.droppedUnknownAa++;
                         continue;
                     }
+                    // Select peptides by the same modification-aware precursor m/z window the library
+                    // prediction uses, so the FASTA's target set matches what the library will contain.
                     if (cfg.applyMzFilter
-                            && !fitsMzRange(neutralMass, cfg.charges, cfg.minMz, cfg.maxMz)) {
+                            && !fitsMzRangeWithMods(pep, cfg.charges, cfg.minMz, cfg.maxMz)) {
                         r.droppedOutOfMz++;
                         continue;
                     }

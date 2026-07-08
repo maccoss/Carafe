@@ -1,16 +1,81 @@
 package test.java.db;
 
+import com.compomics.util.experiment.biology.enzymes.Enzyme;
 import main.java.db.DBGear;
+import main.java.input.CParameter;
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import java.util.Set;
+
 /**
- * Tests for {@link DBGear#get_mz}, the precursor m/z calculation. It is foundational -- every
- * library precursor, isolation-window assignment and apex lookup depends on it -- and a regression
- * here would be silent, so the mass/charge relation is pinned. The proton mass is read back from
- * the method itself (mass 0, charge 1) to avoid hard-coding the exact constant.
+ * Tests for {@link DBGear#get_mz}, the precursor m/z calculation, and for N-terminal methionine
+ * clipping in {@link DBGear#digest_protein}. get_mz is foundational -- every library precursor,
+ * isolation-window assignment and apex lookup depends on it -- and a regression here would be
+ * silent, so the mass/charge relation is pinned. The clip tests guard the fix for issue #1: the
+ * clip must fire only for a true protein initiator methionine during a real digest, and never in
+ * NoCut mode (where each record is an already-digested peptide).
  */
 public class DBGearTest {
+
+    // The clip tests mutate global CParameter digest settings; save/restore so they don't leak.
+    private int savedEnzyme, savedMissed, savedMinLen, savedMaxLen;
+    private boolean savedClipM;
+
+    @BeforeMethod
+    public void saveCParameter() {
+        savedEnzyme = CParameter.enzyme;
+        savedMissed = CParameter.maxMissedCleavages;
+        savedMinLen = CParameter.minPeptideLength;
+        savedMaxLen = CParameter.maxPeptideLength;
+        savedClipM = CParameter.clip_nTerm_M;
+    }
+
+    @AfterMethod
+    public void restoreCParameter() {
+        CParameter.enzyme = savedEnzyme;
+        CParameter.maxMissedCleavages = savedMissed;
+        CParameter.minPeptideLength = savedMinLen;
+        CParameter.maxPeptideLength = savedMaxLen;
+        CParameter.clip_nTerm_M = savedClipM;
+    }
+
+    private void permissiveDigestParams() {
+        CParameter.clip_nTerm_M = true;
+        CParameter.maxMissedCleavages = 0;
+        CParameter.minPeptideLength = 5;
+        CParameter.maxPeptideLength = 35;
+    }
+
+    @Test
+    public void noCutEnzymeNeverClipsNTerminalMet() {
+        DBGear.init_enzymes();
+        permissiveDigestParams();
+        DBGear g = new DBGear();
+        Enzyme noCut = DBGear.getEnzymeByIndex(DBGear.getEnzymeIndexByName("NoCut"));
+        // In NoCut mode the record IS the peptide; it must be taken as-is with the leading M kept.
+        Set<String> peptides = g.digest_protein(noCut, "MPEPTIDEK");
+        Assert.assertTrue(peptides.contains("MPEPTIDEK"), "NoCut must keep the peptide as-is");
+        Assert.assertFalse(peptides.contains("PEPTIDEK"),
+                "NoCut must not clip the N-terminal methionine");
+    }
+
+    @Test
+    public void trypsinClipsOnlyTheProteinInitiatorMet() {
+        DBGear.init_enzymes();
+        permissiveDigestParams();
+        DBGear g = new DBGear();
+        Enzyme trypsin = DBGear.getEnzymeByIndex(1); // Trypsin
+        // Protein starts with M (real initiator) and also contains an INTERNAL M-starting peptide.
+        Set<String> peptides = g.digest_protein(trypsin, "MAAAAAKMPEPTIDEK");
+        Assert.assertTrue(peptides.contains("MAAAAAK"), "leading peptide retained");
+        Assert.assertTrue(peptides.contains("AAAAAK"), "initiator Met of the leading peptide clipped");
+        Assert.assertTrue(peptides.contains("MPEPTIDEK"), "internal M-starting peptide retained");
+        Assert.assertFalse(peptides.contains("PEPTIDEK"),
+                "internal M (not a protein initiator) must not be clipped");
+    }
 
     @Test
     public void mzFollowsTheMassChargeRelation() {
