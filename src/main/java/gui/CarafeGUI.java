@@ -4274,7 +4274,11 @@ public class CarafeGUI extends JFrame {
         // cmd.append("-maxVar ").append(maxVarSpinner.getValue()).append(" ");
         commandArgs.add("-maxVar");
         commandArgs.add(maxVarSpinner.getValue().toString());
-        if (clipNmCheckbox.isSelected()) {
+        // -clip_n_m clips a true protein N-terminal initiator Met during a real protein digest. In the
+        // Osprey path the enzyme is "NoCut" and the input is an already-digested peptide FASTA (whose
+        // initiator-Met clipping was already applied when that FASTA was built), so re-clipping here
+        // would strip the leading M off every M-starting peptide. Only emit the flag for a real digest.
+        if (clipNmCheckbox.isSelected() && !"NoCut".equalsIgnoreCase(enzyme)) {
             // cmd.append("-clip_n_m ");
             commandArgs.add("-clip_n_m");
         }
@@ -5161,6 +5165,11 @@ public class CarafeGUI extends JFrame {
 
                 // Deterministic output paths.
                 String pep1 = outDir + File.separator + "osprey_train_db_peptides.fasta";
+                // The pairing manifest is written twice: EntrapmentFastaGear writes the pre-prediction
+                // "prelim" manifest describing the peptide FASTA; after prediction the reconciler prunes
+                // it to the peptides actually present in the predicted library and writes the
+                // authoritative manifest that Osprey (--decoy-pairing-manifest) and FDRBench consume.
+                String man1Prelim = outDir + File.separator + "osprey_train_db_pairing.prelim.tsv";
                 String man1 = outDir + File.separator + "osprey_train_db_pairing.tsv";
                 String lib1Tsv = outDir + File.separator + "osprey_initial_library"
                         + File.separator + "carafe_spectral_library.tsv";
@@ -5180,11 +5189,16 @@ public class CarafeGUI extends JFrame {
                 // The library-DB peptide FASTA + manifest: reuse the training-DB ones only when the
                 // databases are identical AND no entrapment is requested.
                 String pep2 = shareFasta ? pep1 : outDir + File.separator + "osprey_library_db_peptides.fasta";
-                String man2 = shareFasta ? man1 : outDir + File.separator + "osprey_library_db_pairing.tsv";
+                // Even when the FASTA (and its prelim manifest) is shared, the training and library
+                // searches use DIFFERENT predicted libraries (initial vs finetuned), which may drop
+                // different peptides — so each gets its own reconciled manifest.
+                String man2Prelim = shareFasta ? man1Prelim
+                        : outDir + File.separator + "osprey_library_db_pairing.prelim.tsv";
+                String man2 = outDir + File.separator + "osprey_library_db_pairing.tsv";
 
                 // Build all tasks up front (output paths are deterministic). The training-DB FASTA is
                 // always target+decoy only (never entrapment) so fine-tuning is not trained on it.
-                CmdTask ent1 = buildEntrapmentFastaCommand(trainDb, pep1, man1, fastaPlan.trainingEntrapment);
+                CmdTask ent1 = buildEntrapmentFastaCommand(trainDb, pep1, man1Prelim, fastaPlan.trainingEntrapment);
                 ent1.task_description = "Build target-decoy peptide FASTA (training DB)";
 
                 CmdTask lib1;
@@ -5212,6 +5226,12 @@ public class CarafeGUI extends JFrame {
                 }
                 lib1.skip_check_file = lib1Tsv;
 
+                // Reconcile the training manifest to the peptides actually in the initial library, so
+                // Osprey's target-decoy paired competition on the training search sees a manifest that
+                // matches the searched library.
+                CmdTask reconcile1 = buildReconcileManifestCommand(man1Prelim, lib1Tsv, man1);
+                reconcile1.task_description = "Reconcile training pairing manifest to the initial library";
+
                 new File(ospreyTrainDir).mkdirs();
                 CmdTask osprey1 = buildOspreyCommand(trainMs, lib1Tsv, man1, ospreyTrainDir, null);
                 if (osprey1 == null) {
@@ -5224,7 +5244,7 @@ public class CarafeGUI extends JFrame {
                 // separately whenever it can't be shared with the training-DB FASTA (different DBs,
                 // or entrapment requested). When shared, the training-DB target+decoy FASTA is reused.
                 CmdTask ent2 = shareFasta ? null
-                        : buildEntrapmentFastaCommand(libraryDb, pep2, man2, fastaPlan.libraryEntrapment);
+                        : buildEntrapmentFastaCommand(libraryDb, pep2, man2Prelim, fastaPlan.libraryEntrapment);
                 if (ent2 != null) {
                     ent2.task_description = entrap
                             ? "Build target-decoy-entrapment peptide FASTA (library DB)"
@@ -5255,6 +5275,12 @@ public class CarafeGUI extends JFrame {
                 }
                 lib2.task_description = "Carafe: finetune on Osprey results and build new library";
                 lib2.skip_check_file = lib2Tsv;
+
+                // Reconcile the library manifest to the peptides actually in the finetuned library, so
+                // the manifest Osprey/FDRBench use describes exactly the searched library (no entrapment
+                // without a target, no rows for peptides that were dropped in prediction).
+                CmdTask reconcile2 = buildReconcileManifestCommand(man2Prelim, lib2Tsv, man2);
+                reconcile2.task_description = "Reconcile library pairing manifest to the finetuned library";
 
                 CmdTask osprey2 = null;
                 if (endToEnd) {
@@ -5308,8 +5334,13 @@ public class CarafeGUI extends JFrame {
                 if (!koinaParallel) {
                     seq.add(lib1);
                 }
+                // Reconcile each manifest to its library right after that library is predicted and
+                // before the search that consumes it (reconcile2 also runs for workflow 4, where the
+                // reconciled library manifest is the deliverable and there is no project search).
+                seq.add(reconcile1);
                 seq.add(osprey1);
                 seq.add(lib2);
+                seq.add(reconcile2);
                 if (endToEnd && osprey2 != null) {
                     seq.add(osprey2);
                 }
@@ -7066,6 +7097,35 @@ public class CarafeGUI extends JFrame {
         args.add(minPepChargeSpinner.getValue().toString());
         args.add("-max_pep_charge");
         args.add(maxPepChargeSpinner.getValue().toString());
+        // The peptide FASTA must be selected by the SAME Library Generation rules the NoCut prediction
+        // step uses, so the target set it builds (and pairs) is exactly what the predicted library will
+        // contain. Forward clip-N-term-M, the modifications, and the precursor m/z window here; the
+        // enzyme/miss_c/length/charge above already match. clip_n_m clips only the true protein
+        // N-terminus at this real-protein digest, before entrapment/decoy are added.
+        if (clipNmCheckbox.isSelected()) {
+            args.add("-clip_n_m");
+        }
+        String fixModSelected = fixModSelectedField.getText().trim();
+        if (!fixModSelected.isEmpty()) {
+            fixModSelected = fixModSelected.replaceAll("^,", "").replaceAll(",$", "");
+            args.add("-fixMod");
+            args.add(fixModSelected);
+        }
+        String varModSelected = varModSelectedField.getText().trim();
+        if (!varModSelected.isEmpty()) {
+            varModSelected = varModSelected.replaceAll("^,", "").replaceAll(",$", "");
+            args.add("-varMod");
+            args.add(varModSelected);
+        }
+        args.add("-maxVar");
+        args.add(maxVarSpinner.getValue().toString());
+        args.add("-min_pep_mz");
+        args.add(minPepMzSpinner.getValue().toString());
+        args.add("-max_pep_mz");
+        args.add(maxPepMzSpinner.getValue().toString());
+        // Enable the precursor m/z window so a peptide with no in-window precursor is dropped here,
+        // exactly as the library prediction would drop it (see EntrapmentFastaGear's mod-aware filter).
+        args.add("-mz_filter");
         if (withEntrapment) {
             args.add("-entrapment");
         }
@@ -7078,6 +7138,48 @@ public class CarafeGUI extends JFrame {
         task.out_files.add(outPeptideFasta);
         task.out_files_description.add("Peptide-level FASTA (target+decoy)");
         task.skip_check_file = outPeptideFasta;
+        return task;
+    }
+
+    /**
+     * Build the Carafe {@code -reconcile_manifest} command: prune the (prelim) pairing manifest to the
+     * peptides actually present in the predicted library and write the authoritative manifest that
+     * Osprey ({@code --decoy-pairing-manifest}) and FDRBench consume, so the manifest and the searched
+     * library agree by construction.
+     */
+    private CmdTask buildReconcileManifestCommand(String prelimManifest, String predictedLibrary,
+            String outManifest) {
+        List<String> args = new ArrayList<>();
+        String javaExec = getJavaExecutable();
+        boolean exeLaunch = false;
+        if (javaExec.endsWith("java.exe") || javaExec.endsWith("java")) {
+            // use as is
+        } else if (javaExec.endsWith("Carafe.exe")) {
+            exeLaunch = true;
+        } else {
+            javaExec = "java";
+        }
+        args.add(javaExec);
+        if (!exeLaunch) {
+            args.add("-jar");
+            args.add(getCarafeJarPath());
+        }
+        args.add("-reconcile_manifest");
+        args.add(outManifest);
+        args.add("-manifest");
+        args.add(prelimManifest);
+        args.add("-predicted_library");
+        args.add(predictedLibrary);
+
+        CmdTask task = new CmdTask(args, "Carafe", "Reconcile pairing manifest to predicted library");
+        task.cmd = String.join(" ", args);
+        task.input_files.add(predictedLibrary);
+        task.input_files.add(prelimManifest);
+        File parent = new File(outManifest).getParentFile();
+        task.out_dir = parent != null ? parent.getAbsolutePath() : ".";
+        task.out_files.add(outManifest);
+        task.out_files_description.add("Reconciled FDRBench pairing manifest");
+        task.skip_check_file = outManifest;
         return task;
     }
 

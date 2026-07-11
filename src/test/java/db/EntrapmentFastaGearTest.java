@@ -42,8 +42,10 @@ public class EntrapmentFastaGearTest {
 
     // baseConfig() mutates global CParameter digest settings; save/restore so these tests don't
     // leak state into others that read CParameter (e.g. AIGear digestion tests).
-    private int savedEnzyme, savedMissed, savedMinLen, savedMaxLen;
+    private int savedEnzyme, savedMissed, savedMinLen, savedMaxLen, savedMaxVar;
     private boolean savedClipM;
+    private String savedFixMods, savedVarMods;
+    private double savedMinMz, savedMaxMz;
 
     @BeforeMethod
     public void saveCParameter() {
@@ -52,6 +54,11 @@ public class EntrapmentFastaGearTest {
         savedMinLen = CParameter.minPeptideLength;
         savedMaxLen = CParameter.maxPeptideLength;
         savedClipM = CParameter.clip_nTerm_M;
+        savedFixMods = CParameter.fixMods;
+        savedVarMods = CParameter.varMods;
+        savedMaxVar = CParameter.maxVarMods;
+        savedMinMz = CParameter.minPeptideMz;
+        savedMaxMz = CParameter.maxPeptideMz;
     }
 
     @AfterMethod
@@ -61,6 +68,11 @@ public class EntrapmentFastaGearTest {
         CParameter.minPeptideLength = savedMinLen;
         CParameter.maxPeptideLength = savedMaxLen;
         CParameter.clip_nTerm_M = savedClipM;
+        CParameter.fixMods = savedFixMods;
+        CParameter.varMods = savedVarMods;
+        CParameter.maxVarMods = savedMaxVar;
+        CParameter.minPeptideMz = savedMinMz;
+        CParameter.maxPeptideMz = savedMaxMz;
     }
 
     private Path writeFastaFrom(String content) throws IOException {
@@ -407,5 +419,74 @@ public class EntrapmentFastaGearTest {
             Assert.assertFalse(e[0].matches(".*_pep\\d+.*"),
                     "no _pep suffix when uniqueAccessions is off: " + e[0]);
         }
+    }
+
+    @Test
+    public void clipNTermM_scopedToProteinInitiator_bothFormsKeptAndPaired() throws IOException {
+        // Protein starts with M (a real initiator Met) AND contains an internal M-starting tryptic
+        // peptide. The clip must fire only for the protein's leading peptide, before entrapment/decoy.
+        String fasta = ">sp|P1|X protein\nMDEFHIKMNPQSTVWYR\n";
+        Path in = writeFastaFrom(fasta);
+        Path outFasta = Files.createTempFile("entrap_clip", ".fasta");
+        Path manifest = Files.createTempFile("entrap_clip_man", ".tsv");
+        EntrapmentFastaGear.Config cfg = baseConfig(in, outFasta, manifest);
+        CParameter.clip_nTerm_M = true; // baseConfig sets it false; enable clipping for this test
+        CParameter.minPeptideLength = 5;
+        CParameter.maxMissedCleavages = 0;
+        cfg.addEntrapment = true;
+        cfg.addDecoys = true;
+
+        EntrapmentFastaGear.run(cfg);
+
+        List<Map<String, String>> rows = readManifest(manifest);
+        Set<String> targets = new HashSet<>();
+        for (Map<String, String> row : rows) {
+            if (row.get("peptide_type").equals("target")) {
+                targets.add(row.get("sequence"));
+            }
+        }
+        // The protein initiator Met yields BOTH the M and the M-clipped leading peptide as targets.
+        Assert.assertTrue(targets.contains("MDEFHIK"), "unclipped leading peptide is a target: " + targets);
+        Assert.assertTrue(targets.contains("DEFHIK"), "clipped leading peptide is a target: " + targets);
+        // The internal M-starting peptide is retained but NOT clipped.
+        Assert.assertTrue(targets.contains("MNPQSTVWYR"), "internal M-starting peptide retained");
+        Assert.assertFalse(targets.contains("NPQSTVWYR"),
+                "internal M (not a protein initiator) must not be clipped");
+
+        // No orphan entrapment: every p_target row shares its pair_index with a target row.
+        Map<String, Set<String>> typesByPair = new java.util.HashMap<>();
+        for (Map<String, String> row : rows) {
+            typesByPair.computeIfAbsent(row.get("peptide_pair_index"), k -> new HashSet<>())
+                    .add(row.get("peptide_type"));
+        }
+        for (Map.Entry<String, Set<String>> e : typesByPair.entrySet()) {
+            if (e.getValue().contains("p_target")) {
+                Assert.assertTrue(e.getValue().contains("target"),
+                        "entrapment in pair " + e.getKey() + " must be paired with a target");
+            }
+        }
+    }
+
+    @Test
+    public void mzFilterIsModificationAware_appliesFixedCarbamidomethyl() {
+        // With Carbamidomethyl(C) as the fixed modification, a Cys peptide's precursor mass is +57.02
+        // heavier than its bare mass, so the mod-aware filter must decide the m/z window on the
+        // modified mass. Choose a 2+ window that the modified precursor lands in but the bare one does
+        // not, and confirm the two filters disagree (proving the +57 shift is applied).
+        CParameter.fixMods = "1"; // Carbamidomethylation of C
+        CParameter.varMods = "0"; // no variable mods -> exactly one peptidoform for this Cys peptide
+        CParameter.maxVarMods = 1;
+        String cysPeptide = "CPEPTIDEK";
+        int[] charges = {2};
+        double minMz = 530.0;
+        double maxMz = 550.0;
+
+        boolean modAware = EntrapmentFastaGear.fitsMzRangeWithMods(cysPeptide, charges, minMz, maxMz);
+        Double bareMass = EntrapmentFastaGear.peptideNeutralMass(cysPeptide);
+        Assert.assertNotNull(bareMass);
+        boolean bare = EntrapmentFastaGear.fitsMzRange(bareMass, charges, minMz, maxMz);
+
+        Assert.assertTrue(modAware, "the +57 carbamidomethyl precursor should fall inside the window");
+        Assert.assertFalse(bare, "the unmodified precursor should fall outside the window");
     }
 }

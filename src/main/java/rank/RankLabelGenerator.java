@@ -1016,7 +1016,10 @@ class  RankLabelGenerator{
             proteinSequence = proteinSequence.replaceAll("I", "L");
         }
         HashSet<String> peptides = enzyme.digest(proteinSequence, RParameter.maxMissedCleavages, RParameter.minPeptideLength, RParameter.maxPeptideLength);
-        if(RParameter.clip_nTerm_M && proteinSequence.startsWith("M")){
+        // Never clip the N-terminal Met in NoCut mode: each record is an already-digested peptide with
+        // no parent-protein context, so clipping would strip the leading M off every M-starting peptide.
+        boolean isNoCut = enzyme != null && "NoCut".equalsIgnoreCase(enzyme.getName());
+        if(RParameter.clip_nTerm_M && !isNoCut && proteinSequence.startsWith("M")){
             List<String> n_term_peptides = peptides.stream().filter(proteinSequence::startsWith).filter(pep -> pep.length() >= (RParameter.minPeptideLength+1)).map(pep -> pep.substring(1)).collect(toList());
             if(!n_term_peptides.isEmpty()){
                 peptides.addAll(n_term_peptides);

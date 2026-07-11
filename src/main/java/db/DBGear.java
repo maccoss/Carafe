@@ -123,7 +123,11 @@ public class DBGear {
             proteinSequence = proteinSequence.replaceAll("I", "L");
         }
         HashSet<String> peptides = enzyme.digest(proteinSequence, CParameter.maxMissedCleavages, CParameter.minPeptideLength, CParameter.maxPeptideLength);
-        if(CParameter.clip_nTerm_M && proteinSequence.startsWith("M")){
+        // Clip the protein N-terminal initiator methionine only for a genuine protein digest. In
+        // NoCut mode every record IS a single, already-digested peptide, so proteinSequence.startsWith(pep)
+        // is vacuously true for any M-starting peptide; clipping there would wrongly strip the leading M
+        // off every M-starting peptide (internal Mets included). NoCut must take peptides as-is.
+        if(CParameter.clip_nTerm_M && !isNoCutEnzyme(enzyme) && proteinSequence.startsWith("M")){
             List<String> n_term_peptides = peptides.stream().filter(proteinSequence::startsWith).filter(pep -> pep.length() >= (CParameter.minPeptideLength+1)).map(pep -> pep.substring(1)).toList();
             if(!n_term_peptides.isEmpty()){
                 peptides.addAll(n_term_peptides);
@@ -392,6 +396,17 @@ public class DBGear {
      */
     public static boolean isNonSpecificEnzyme(){
         return DBGear.getEnzymeByIndex(CParameter.enzyme).getName().equalsIgnoreCase("non-specific");
+    }
+
+    /**
+     * Check if an enzyme is the "NoCut" pseudo-enzyme (each input sequence is treated as a single,
+     * already-digested peptide). N-terminal methionine clipping is meaningless in this mode because
+     * the record carries no parent-protein context, so callers must not clip in NoCut mode.
+     * @param enzyme the enzyme to test
+     * @return true if the enzyme is NoCut, false otherwise
+     */
+    public static boolean isNoCutEnzyme(Enzyme enzyme){
+        return enzyme != null && "NoCut".equalsIgnoreCase(enzyme.getName());
     }
 
     public static int getEnzymeIndexByName(String enzyme_name){
