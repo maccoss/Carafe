@@ -1,5 +1,7 @@
 package main.java.gui;
 
+import java.util.Locale;
+
 /**
  * Decides the output format of the finetuned library that the Osprey workflows deliver, honoring
  * the GUI's "Spectral Library Format" selection instead of always forcing DIA-NN TSV.
@@ -64,14 +66,15 @@ public final class OspreyLibraryFormatPlanner {
      * @return the format plan
      */
     public static Plan plan(String userFormat, boolean endToEnd) {
-        boolean skyline = userFormat != null && userFormat.toLowerCase().contains("skyline");
+        boolean skyline = userFormat != null && userFormat.toLowerCase(Locale.ROOT).contains("skyline");
         if (!skyline) {
             // DIA-NN (or any non-Skyline TSV format): unchanged behavior.
             return new Plan("DIA-NN", false, true, LIB_TSV, LIB_TSV, LIB_TSV);
         }
         if (endToEnd) {
-            // Workflow 5: blib deliverable + TSV for the project search and reconciliation.
-            return new Plan("Skyline,DIA-NN", true, true, LIB_TSV, LIB_BLIB, LIB_TSV);
+            // Workflow 5: blib deliverable + TSV for the project search and reconciliation. The reuse
+            // skip check is the TSV — the project search needs it, so a missing TSV must re-run lib2.
+            return new Plan("Skyline,DIA-NN", true, true, LIB_TSV, LIB_TSV, LIB_TSV);
         }
         // Workflow 4: blib only; the reconciler reads peptides from the blib.
         return new Plan("Skyline", true, false, LIB_BLIB, LIB_BLIB, LIB_TSV);

@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -217,7 +218,10 @@ public final class PairingManifestReconciler {
      * whether Workflow 4 emits a TSV or a blib.
      */
     private static Set<String> readLibrarySequences(String library) throws IOException {
-        if (library.toLowerCase().endsWith(".blib")) {
+        if (library == null) {
+            throw new IOException("null predicted-library path");
+        }
+        if (library.toLowerCase(Locale.ROOT).endsWith(".blib")) {
             return readBlibSequences(library);
         }
         Set<String> sequences = new HashSet<>();

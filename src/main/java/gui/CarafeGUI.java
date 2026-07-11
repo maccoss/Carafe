@@ -5286,9 +5286,23 @@ public class CarafeGUI extends JFrame {
                         : "Carafe: finetune on Osprey results and build new library";
                 lib2.skip_check_file = lib2SkipCheck;
                 if (libPlan.blib) {
-                    logToConsole("[Carafe] Spectral Library Format 'Skyline': the finetuned library will "
-                            + "be written as a BiblioSpec .blib (" + libPlan.reconcileFileName + ")"
-                            + (libPlan.tsv ? " alongside the DIA-NN .tsv needed for the Osprey project search." : ".")
+                    // buildCarafeCommand declares the TSV as the output; correct it to the files that
+                    // are actually written so post-run output checks and the reuse-skip logic match.
+                    lib2.out_files.clear();
+                    lib2.out_files_description.clear();
+                    lib2.out_files.add(newLibDir + File.separator + OspreyLibraryFormatPlanner.LIB_BLIB);
+                    lib2.out_files_description.add("Carafe fine-tuned spectral library (Skyline blib)");
+                    if (libPlan.tsv) {
+                        lib2.out_files.add(newLibDir + File.separator + OspreyLibraryFormatPlanner.LIB_TSV);
+                        lib2.out_files_description.add(
+                                "Carafe fine-tuned spectral library (DIA-NN TSV, for the Osprey project search)");
+                    }
+                    logToConsole("[Carafe] Spectral Library Format 'Skyline': the finetuned library will be "
+                            + "written as a BiblioSpec .blib (" + OspreyLibraryFormatPlanner.LIB_BLIB + ")"
+                            + (libPlan.tsv
+                                    ? " alongside the DIA-NN .tsv (" + OspreyLibraryFormatPlanner.LIB_TSV
+                                            + ") needed for the Osprey project search."
+                                    : ".")
                             + "\n");
                 }
 

@@ -45,7 +45,8 @@ public class OspreyLibraryFormatPlannerTest {
         Assert.assertTrue(p.tsv);
         Assert.assertEquals(p.reconcileFileName, OspreyLibraryFormatPlanner.LIB_TSV,
                 "reconcile against the TSV when both are produced");
-        Assert.assertEquals(p.skipCheckFileName, OspreyLibraryFormatPlanner.LIB_BLIB);
+        Assert.assertEquals(p.skipCheckFileName, OspreyLibraryFormatPlanner.LIB_TSV,
+                "skip check on the TSV the project search needs, so a missing TSV re-runs lib2");
         Assert.assertEquals(p.searchFileName, OspreyLibraryFormatPlanner.LIB_TSV);
     }
 

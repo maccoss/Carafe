@@ -184,6 +184,16 @@ public class PairingManifestReconcilerTest {
     }
 
     @Test(expectedExceptions = IOException.class)
+    public void failsFastOnNullLibraryPath() throws IOException {
+        // Direct API misuse with a null library path must fail clearly, not NPE.
+        String manifest = "sequence\tdecoy\tproteins\tpeptide_type\tpeptide_pair_index\n"
+                + "TARGETONER\tNo\tsp|P1\ttarget\t0\n";
+        Path manIn = writeTsv("recon_null_lib_man", manifest);
+        Path manOut = Files.createTempFile("recon_out_nulllib", ".tsv");
+        PairingManifestReconciler.run(manIn.toString(), null, manOut.toString());
+    }
+
+    @Test(expectedExceptions = IOException.class)
     public void failsFastOnMalformedLibraryRow() throws IOException {
         // A library row missing the StrippedPeptide column would undercount the library; fail fast.
         String manifest = "sequence\tdecoy\tproteins\tpeptide_type\tpeptide_pair_index\n"
