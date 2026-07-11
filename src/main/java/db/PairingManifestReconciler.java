@@ -8,6 +8,11 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -200,16 +205,24 @@ public final class PairingManifestReconciler {
         return r;
     }
 
-    /** Read the unique I&rarr;L-normalized {@code StrippedPeptide} set from a DIA-NN-format library TSV. */
-    private static Set<String> readLibrarySequences(String libraryTsv) throws IOException {
+    /**
+     * Read the unique I&rarr;L-normalized peptide set from the predicted library. Supports both the
+     * DIA-NN-format library TSV (the {@code StrippedPeptide} column) and a Skyline BiblioSpec
+     * {@code .blib} (the {@code RefSpectra.peptideSeq} column), so the manifest can be reconciled
+     * whether Workflow 4 emits a TSV or a blib.
+     */
+    private static Set<String> readLibrarySequences(String library) throws IOException {
+        if (library.toLowerCase().endsWith(".blib")) {
+            return readBlibSequences(library);
+        }
         Set<String> sequences = new HashSet<>();
-        try (BufferedReader br = Files.newBufferedReader(new File(libraryTsv).toPath(), StandardCharsets.UTF_8)) {
+        try (BufferedReader br = Files.newBufferedReader(new File(library).toPath(), StandardCharsets.UTF_8)) {
             String headerLine = br.readLine();
             if (headerLine == null) {
-                throw new IOException("empty library: " + libraryTsv);
+                throw new IOException("empty library: " + library);
             }
             String[] header = headerLine.split("\t", -1);
-            int iSeq = columnIndex(header, LIBRARY_SEQUENCE_COLUMN, libraryTsv);
+            int iSeq = columnIndex(header, LIBRARY_SEQUENCE_COLUMN, library);
             String line;
             while ((line = br.readLine()) != null) {
                 if (line.isEmpty()) {
@@ -220,6 +233,25 @@ public final class PairingManifestReconciler {
                     sequences.add(normalize(c[iSeq]));
                 }
             }
+        }
+        return sequences;
+    }
+
+    /** Read the unique I&rarr;L-normalized {@code RefSpectra.peptideSeq} set from a BiblioSpec blib. */
+    private static Set<String> readBlibSequences(String blib) throws IOException {
+        Set<String> sequences = new HashSet<>();
+        String url = "jdbc:sqlite:" + blib;
+        try (Connection c = DriverManager.getConnection(url);
+             Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT peptideSeq FROM RefSpectra")) {
+            while (rs.next()) {
+                String seq = rs.getString(1);
+                if (seq != null && !seq.isEmpty()) {
+                    sequences.add(normalize(seq));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IOException("failed to read peptides from blib: " + blib, e);
         }
         return sequences;
     }
