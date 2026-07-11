@@ -37,27 +37,13 @@ jobs:
     runs-on: windows-latest
 
     env:
+      # Osprey lives in the public ProteoWizard/pwiz tree; releases track its master. Manual runs may
+      # override the ref (e.g. to test a fork/branch); tag builds default to master.
       OSPREY_REPO: ${{ github.event.inputs.osprey_repo || 'ProteoWizard/pwiz' }}
-      # Manual runs honor the osprey_ref input (defaults to master, for testing). Tag (release) builds
-      # have no inputs, so they pin to the RELEASE_OSPREY_REF repository variable — set it to a reviewed
-      # pwiz commit SHA or tag so a release never silently bundles whatever is at master tip. The guard
-      # step below fails a tag build that has no pin.
-      OSPREY_REF: ${{ github.event.inputs.osprey_ref || vars.RELEASE_OSPREY_REF }}
+      OSPREY_REF: ${{ github.event.inputs.osprey_ref || 'master' }}
       RID: win-x64
 
     steps:
-      # Reproducible releases: a v* tag build must bundle a pinned, reviewed Osprey revision rather
-      # than whatever master happens to be at build time.
-      - name: Require a pinned Osprey ref for release (tag) builds
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          if [ -z "${OSPREY_REF}" ]; then
-            echo "::error::Release builds must pin Osprey. Set the RELEASE_OSPREY_REF repository variable (Settings > Secrets and variables > Actions > Variables) to a reviewed pwiz commit SHA or tag."
-            exit 1
-          fi
-          echo "Release Osprey ref (pinned): ${OSPREY_REF}"
-
       - name: Checkout Carafe
         uses: actions/checkout@v5
         with:
