@@ -5175,8 +5175,16 @@ public class CarafeGUI extends JFrame {
                         + File.separator + "carafe_spectral_library.tsv";
                 String ospreyTrainDir = outDir + File.separator + "osprey_train";
                 String blib1 = ospreyTrainDir + File.separator + "osprey.blib";
-                String lib2Tsv = outDir + File.separator + "osprey_new_library"
-                        + File.separator + "carafe_spectral_library.tsv";
+                String newLibDir = outDir + File.separator + "osprey_new_library";
+                // Honor the GUI's Spectral Library Format for the finetuned (deliverable) library:
+                // "Skyline" makes the finetuned library a BiblioSpec .blib to import into Skyline. The
+                // .tsv is still written for Workflow 5's Osprey project search (and reconciliation);
+                // Workflow 4 emits the blib only and the reconciler reads peptides from the blib.
+                OspreyLibraryFormatPlanner.Plan libPlan = OspreyLibraryFormatPlanner.plan(
+                        (String) libraryFormatCombo.getSelectedItem(), endToEnd);
+                String lib2Reconcile = newLibDir + File.separator + libPlan.reconcileFileName;
+                String lib2SkipCheck = newLibDir + File.separator + libPlan.skipCheckFileName;
+                String lib2Search = newLibDir + File.separator + libPlan.searchFileName;
                 // Entrapment peptides go ONLY into the library-DB FASTA, which feeds the finetuned
                 // library (used as the project-search library in workflow 5, and the deliverable in
                 // workflow 4). They must NOT go into the training-DB FASTA: the training search
@@ -5266,20 +5274,43 @@ public class CarafeGUI extends JFrame {
                 carafeIOverride = blib1;
                 carafeSeOverride = "Osprey";
                 carafeOutSubdirOverride = "osprey_new_library";
-                carafeLfTypeOverride = "DIA-NN";
+                carafeLfTypeOverride = libPlan.lfType;
                 CmdTask lib2 = buildCarafeCommand(trainMsInput, isTimsTOF);
                 clearCarafeOverrides();
                 if (lib2 == null) {
                     setInputsFrozen(false);
                     return;
                 }
-                lib2.task_description = "Carafe: finetune on Osprey results and build new library";
-                lib2.skip_check_file = lib2Tsv;
+                lib2.task_description = libPlan.blib
+                        ? "Carafe: finetune on Osprey results and build new library (Skyline blib)"
+                        : "Carafe: finetune on Osprey results and build new library";
+                lib2.skip_check_file = lib2SkipCheck;
+                if (libPlan.blib) {
+                    // buildCarafeCommand declares the TSV as the output; correct it to the files that
+                    // are actually written so post-run output checks and the reuse-skip logic match.
+                    lib2.out_files.clear();
+                    lib2.out_files_description.clear();
+                    lib2.out_files.add(newLibDir + File.separator + OspreyLibraryFormatPlanner.LIB_BLIB);
+                    lib2.out_files_description.add("Carafe fine-tuned spectral library (Skyline blib)");
+                    if (libPlan.tsv) {
+                        lib2.out_files.add(newLibDir + File.separator + OspreyLibraryFormatPlanner.LIB_TSV);
+                        lib2.out_files_description.add(
+                                "Carafe fine-tuned spectral library (DIA-NN TSV, for the Osprey project search)");
+                    }
+                    logToConsole("[Carafe] Spectral Library Format 'Skyline': the finetuned library will be "
+                            + "written as a BiblioSpec .blib (" + OspreyLibraryFormatPlanner.LIB_BLIB + ")"
+                            + (libPlan.tsv
+                                    ? " alongside the DIA-NN .tsv (" + OspreyLibraryFormatPlanner.LIB_TSV
+                                            + ") needed for the Osprey project search."
+                                    : ".")
+                            + "\n");
+                }
 
                 // Reconcile the library manifest to the peptides actually in the finetuned library, so
                 // the manifest Osprey/FDRBench use describes exactly the searched library (no entrapment
-                // without a target, no rows for peptides that were dropped in prediction).
-                CmdTask reconcile2 = buildReconcileManifestCommand(man2Prelim, lib2Tsv, man2);
+                // without a target, no rows for peptides that were dropped in prediction). Reads the blib
+                // when that is the only output (Workflow 4 + Skyline), else the TSV.
+                CmdTask reconcile2 = buildReconcileManifestCommand(man2Prelim, lib2Reconcile, man2);
                 reconcile2.task_description = "Reconcile library pairing manifest to the finetuned library";
 
                 CmdTask osprey2 = null;
@@ -5290,7 +5321,8 @@ public class CarafeGUI extends JFrame {
                     // osprey_project/FDRBench (level follows the Osprey tab's --fdr-level); the
                     // pairing manifest is copied alongside it after the search (see buildOspreyCommand).
                     String fdrbenchOut = OspreyFdrBenchPlanner.fdrBenchInputPath(entrap, true, ospreyProjectDir);
-                    osprey2 = buildOspreyCommand(projMs, lib2Tsv, man2, ospreyProjectDir, fdrbenchOut);
+                    // The project search reads the DIA-NN TSV (always produced when end-to-end).
+                    osprey2 = buildOspreyCommand(projMs, lib2Search, man2, ospreyProjectDir, fdrbenchOut);
                     if (osprey2 == null) {
                         setInputsFrozen(false);
                         return;
