@@ -8,6 +8,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -127,6 +130,46 @@ public class PairingManifestReconcilerTest {
                 "the test library contains only peptides present in the manifest");
     }
 
+    @Test
+    public void reconcilesAgainstABlibLibrary() throws Exception {
+        // Workflow 4 + Skyline emits only a .blib; the reconciler must read its peptide set from
+        // RefSpectra.peptideSeq (targets and decoys) instead of a TSV.
+        String manifest = "sequence\tdecoy\tproteins\tpeptide_type\tpeptide_pair_index\n"
+                + "TARGETONER\tNo\tsp|P1\ttarget\t0\n"
+                + "DECOYONER\tYes\tdecoy_sp|P1\tdecoy\t0\n"
+                + "TARGETTWOR\tNo\tsp|P2\ttarget\t1\n"   // target absent from blib -> group dropped
+                + "DECOYTWOR\tYes\tdecoy_sp|P2\tdecoy\t1\n";
+        Path manIn = writeTsv("recon_man_blib", manifest);
+
+        Path blib = Files.createTempFile("recon_lib", ".blib");
+        Files.deleteIfExists(blib);
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + blib);
+             Statement st = c.createStatement()) {
+            st.executeUpdate("CREATE TABLE RefSpectra ("
+                    + "id INTEGER PRIMARY KEY AUTOINCREMENT, peptideSeq VARCHAR, peptideModSeq VARCHAR);");
+            // library has group 0's target+decoy only; group 1's target TARGETTWOR is absent.
+            st.executeUpdate("INSERT INTO RefSpectra (peptideSeq, peptideModSeq) VALUES ('TARGETONER','TARGETONER');");
+            st.executeUpdate("INSERT INTO RefSpectra (peptideSeq, peptideModSeq) VALUES ('DECOYONER','DECOYONER');");
+        }
+
+        Path manOut = Files.createTempFile("recon_out_blib", ".tsv");
+        PairingManifestReconciler.Result r = PairingManifestReconciler.run(
+                manIn.toString(), blib.toString(), manOut.toString());
+
+        Assert.assertEquals(r.libraryPeptides, 2, "two peptides read from the blib");
+        Assert.assertEquals(r.groupsKept, 1);
+        Assert.assertEquals(r.groupsDropped, 1, "group whose target is not in the blib is dropped");
+
+        Set<String> keptSeqs = new HashSet<>();
+        for (String[] row : readManifest(manOut)) {
+            keptSeqs.add(row[0]);
+        }
+        Assert.assertTrue(keptSeqs.contains("TARGETONER"));
+        Assert.assertTrue(keptSeqs.contains("DECOYONER"));
+        Assert.assertFalse(keptSeqs.contains("TARGETTWOR"));
+        Assert.assertFalse(keptSeqs.contains("DECOYTWOR"));
+    }
+
     @Test(expectedExceptions = IOException.class)
     public void failsFastOnMalformedManifestRow() throws IOException {
         // A truncated manifest row must fail loudly, not silently drop the peptide/group.
@@ -138,6 +181,16 @@ public class PairingManifestReconcilerTest {
         Path lib = writeTsv("recon_ok_lib", library);
         Path manOut = Files.createTempFile("recon_out_badman", ".tsv");
         PairingManifestReconciler.run(manIn.toString(), lib.toString(), manOut.toString());
+    }
+
+    @Test(expectedExceptions = IOException.class)
+    public void failsFastOnNullLibraryPath() throws IOException {
+        // Direct API misuse with a null library path must fail clearly, not NPE.
+        String manifest = "sequence\tdecoy\tproteins\tpeptide_type\tpeptide_pair_index\n"
+                + "TARGETONER\tNo\tsp|P1\ttarget\t0\n";
+        Path manIn = writeTsv("recon_null_lib_man", manifest);
+        Path manOut = Files.createTempFile("recon_out_nulllib", ".tsv");
+        PairingManifestReconciler.run(manIn.toString(), null, manOut.toString());
     }
 
     @Test(expectedExceptions = IOException.class)
