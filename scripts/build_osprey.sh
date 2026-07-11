@@ -21,7 +21,7 @@
 #
 # Examples:
 #   scripts/build_osprey.sh                # build the default RID for this host
-#   scripts/build_osprey.sh win-x64 linux-x64 osx-arm64
+#   scripts/build_osprey.sh win-x64 linux-x64 osx-x64 osx-arm64
 #
 set -euo pipefail
 
@@ -76,6 +76,13 @@ for rid in "${RIDS[@]}"; do
     echo "==> Publishing Osprey for ${rid} -> ${dest}"
     rm -rf "${dest}"
     mkdir -p "${dest}"
+    # Derive the MSBuild Platform from the RID architecture so an arm64 RID (e.g. osx-arm64)
+    # is not published with a mismatched x64 Platform.
+    case "${rid}" in
+        *-arm64) platform="ARM64" ;;
+        *-x86)   platform="x86" ;;
+        *)       platform="x64" ;;
+    esac
     # Do NOT use PublishSingleFile: Osprey's blib writer uses System.Data.SQLite,
     # whose native SQLite.Interop.dll is located via the managed assembly's own directory.
     # Under single-file publish Assembly.Location is empty, so the SQLiteConnection ctor
@@ -87,7 +94,7 @@ for rid in "${RIDS[@]}"; do
         -r "${rid}" \
         --self-contained true \
         -p:PublishSingleFile=false \
-        -p:Platform=x64 \
+        -p:Platform="${platform}" \
         -o "${dest}"
 
     # Make the published binary executable on Unix RIDs.

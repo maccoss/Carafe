@@ -204,4 +204,41 @@ public class PairingManifestReconcilerTest {
         Path manOut = Files.createTempFile("recon_out_badlib", ".tsv");
         PairingManifestReconciler.run(manIn.toString(), lib.toString(), manOut.toString());
     }
+
+    @Test
+    public void handlesReorderedHeader() throws IOException {
+        // Columns are resolved by name, so peptide_pair_index need not be last. A valid file with a
+        // reordered header must still reconcile correctly.
+        String manifest = "peptide_pair_index\tpeptide_type\tdecoy\tproteins\tsequence\n"
+                + "0\ttarget\tNo\tsp|P1\tTARGETONER\n"
+                + "0\tdecoy\tYes\tdecoy_sp|P1\tDECOYONER\n";
+        String library = "ModifiedPeptide\tStrippedPeptide\n_TARGETONER_\tTARGETONER\n_DECOYONER_\tDECOYONER\n";
+        Path manIn = writeTsv("recon_reorder_man", manifest);
+        Path lib = writeTsv("recon_reorder_lib", library);
+        Path manOut = Files.createTempFile("recon_out_reorder", ".tsv");
+
+        PairingManifestReconciler.Result r = PairingManifestReconciler.run(
+                manIn.toString(), lib.toString(), manOut.toString());
+        Assert.assertEquals(r.groupsKept, 1);
+        Set<String> kept = new HashSet<>();
+        for (String[] row : readManifest(manOut)) {
+            kept.add(row[0]);
+        }
+        Assert.assertTrue(kept.contains("TARGETONER"));
+        Assert.assertTrue(kept.contains("DECOYONER"));
+    }
+
+    @Test(expectedExceptions = IOException.class)
+    public void failsFastOnShortRowWithReorderedHeader() throws IOException {
+        // A row long enough for peptide_pair_index (index 0 here) but too short for 'sequence'
+        // (index 4) must still be rejected — the guard uses the max column index, not just iPair.
+        String manifest = "peptide_pair_index\tpeptide_type\tdecoy\tproteins\tsequence\n"
+                + "0\ttarget\tNo\tsp|P1\tTARGETONER\n"
+                + "0\ttarget\tNo\n"; // 3 columns: has pair_index but not the sequence column
+        String library = "ModifiedPeptide\tStrippedPeptide\n_TARGETONER_\tTARGETONER\n";
+        Path manIn = writeTsv("recon_reorder_short_man", manifest);
+        Path lib = writeTsv("recon_reorder_short_lib", library);
+        Path manOut = Files.createTempFile("recon_out_reorder_short", ".tsv");
+        PairingManifestReconciler.run(manIn.toString(), lib.toString(), manOut.toString());
+    }
 }

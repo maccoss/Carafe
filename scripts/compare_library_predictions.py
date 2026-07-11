@@ -37,9 +37,16 @@ from collections import defaultdict
 from pathlib import Path
 
 
-def load_fragments(path: Path, peptide: str, charge: int) -> dict[tuple, float]:
-    """Map (FragmentType, FragmentNumber, FragmentCharge) -> RelativeIntensity for one precursor."""
+def load_fragments(path: Path, peptide: str, charge: int, modified: str | None = None) -> dict[tuple, float]:
+    """Map (FragmentType, FragmentNumber, FragmentCharge) -> RelativeIntensity for one precursor.
+
+    Filters by StrippedPeptide + PrecursorCharge, and by ModifiedPeptide when ``modified`` is given.
+    Because a stripped sequence + charge can match multiple peptidoforms once variable mods are
+    enabled, this fails loudly if the filter still matches more than one distinct ModifiedPeptide,
+    rather than silently overwriting fragments across a mixed spectrum.
+    """
     frags: dict[tuple, float] = {}
+    seen_mods: set[str] = set()
     with path.open() as f:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
@@ -47,8 +54,17 @@ def load_fragments(path: Path, peptide: str, charge: int) -> dict[tuple, float]:
                 continue
             if int(float(row.get("PrecursorCharge", 0))) != charge:
                 continue
+            mod = row.get("ModifiedPeptide", "")
+            if modified is not None and mod != modified:
+                continue
+            seen_mods.add(mod)
             key = (row["FragmentType"], int(row["FragmentNumber"]), int(row["FragmentCharge"]))
             frags[key] = float(row["RelativeIntensity"])
+    if len(seen_mods) > 1:
+        raise SystemExit(
+            f"Ambiguous precursor: {peptide} (charge {charge}) matches multiple modified peptides in "
+            f"{path}: {', '.join(sorted(seen_mods))}. Re-run with --modified-peptide to pick one."
+        )
     return frags
 
 
@@ -66,11 +82,14 @@ def main() -> int:
     ap.add_argument("--koina", required=True, type=Path, help="Koina prediction library TSV.")
     ap.add_argument("--peptide", required=True, help="Stripped peptide sequence, e.g. ELVISLIVESR.")
     ap.add_argument("--charge", type=int, default=2, help="Precursor charge to compare [default: 2].")
+    ap.add_argument("--modified-peptide", default=None,
+                    help="ModifiedPeptide to disambiguate when a stripped sequence + charge has "
+                         "multiple peptidoforms (e.g. '_KLWWDC[UniMod:4]YWWDR_').")
     ap.add_argument("--top", type=int, default=10, help="Show this many top fragments [default: 10].")
     args = ap.parse_args()
 
-    local = load_fragments(args.local, args.peptide, args.charge)
-    koina = load_fragments(args.koina, args.peptide, args.charge)
+    local = load_fragments(args.local, args.peptide, args.charge, args.modified_peptide)
+    koina = load_fragments(args.koina, args.peptide, args.charge, args.modified_peptide)
     if not local:
         print(f"WARNING: no fragments for {args.peptide} (z={args.charge}) in {args.local}")
     if not koina:

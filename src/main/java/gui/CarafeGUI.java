@@ -5151,6 +5151,18 @@ public class CarafeGUI extends JFrame {
                 }
 
                 boolean isTimsTOF = trainMs.stream().anyMatch(p -> p.toLowerCase().endsWith(".d"));
+                // Carafe's -ms takes a single file or ONE folder. With multiple training files it is
+                // handed the parent directory, so they must all live in the same directory or the rest
+                // of the training set would be silently dropped. Guard as the DIA-NN flows do (files
+                // that were converted all land in the same convert subdir, so this passes for them).
+                if (!OspreyMsInputPlanner.allInSameDirectory(trainMs)) {
+                    JOptionPane.showMessageDialog(this,
+                            "All training MS files must be in the same directory (Carafe reads the "
+                                    + "containing folder). Move them together or select a single folder.",
+                            "Input Required", JOptionPane.WARNING_MESSAGE);
+                    setInputsFrozen(false);
+                    return;
+                }
                 String trainMsInput = trainMs.size() == 1 ? trainMs.getFirst()
                         : new File(trainMs.getFirst()).getParent();
 
@@ -5856,7 +5868,7 @@ public class CarafeGUI extends JFrame {
                         try {
                             fut.get();
                         } catch (Exception e) {
-                            failed.set(true);
+                            abortRunningLanes(failed);
                         }
                     }
                     if (failed.get()) {
@@ -5924,7 +5936,7 @@ public class CarafeGUI extends JFrame {
                 }
             } catch (Exception e) {
                 logToConsole("\n[ERROR] " + command.task_description + " failed: " + e.getMessage() + "\n");
-                failed.set(true);
+                abortRunningLanes(failed);
                 return;
             }
             long end = System.nanoTime();
@@ -5938,7 +5950,7 @@ public class CarafeGUI extends JFrame {
             if (exitCode != 0) {
                 logToConsole("\n[ERROR] " + command.task_description + " failed with exit code: "
                         + exitCode + "\n");
-                failed.set(true);
+                abortRunningLanes(failed);
                 return;
             }
             // Post-success hook (e.g. move a locally-staged blib to its final network path).
@@ -5949,11 +5961,29 @@ public class CarafeGUI extends JFrame {
                 } catch (Exception ex) {
                     logToConsole("\n[ERROR] " + command.task_description + " post-step failed: "
                             + ex.getMessage() + "\n");
-                    failed.set(true);
+                    abortRunningLanes(failed);
                     return;
                 }
             }
             writeStepSignature(command);
+        }
+    }
+
+    /**
+     * Mark the workflow failed and, on the first failure only, terminate the subprocesses still
+     * running in the other lanes. Without this a single early failure lets any MSConvert/Koina/Osprey
+     * process already running in another lane keep going until it exits on its own, burning through the
+     * rest of the phase before the workflow unwinds.
+     */
+    private void abortRunningLanes(java.util.concurrent.atomic.AtomicBoolean failed) {
+        if (!failed.compareAndSet(false, true)) {
+            return; // another lane already failed and did the termination
+        }
+        java.util.List<Process> outstanding = new java.util.ArrayList<>(activeProcesses);
+        if (!outstanding.isEmpty()) {
+            logToConsole("\n[ABORT] A step failed; terminating " + outstanding.size()
+                    + " other running process(es).\n");
+            main.java.util.ProcessUtils.terminateAll(outstanding);
         }
     }
 
@@ -7832,20 +7862,12 @@ public class CarafeGUI extends JFrame {
     }
 
     private void setInputsFrozen(boolean frozen) {
-        // We only want to freeze the input/settings tabs.
-        // Tabs index:
-        // 0: Workflow
-        // 1: Training Data Generation
-        // 2: Model Training
-        // 3: Library Generation
-        // 4: Console (Do not freeze)
-
-        // Safety check on tab count
+        // Freeze every input/settings tab (Workflow, Training Data Generation, Model Training,
+        // Library Generation, Osprey, ...) during a run, leaving only the Console interactive.
+        // Selecting tabs by "not Console" rather than a fixed count keeps this correct as tabs are
+        // added (e.g. the Osprey tab) instead of silently leaving a new settings tab editable.
         if (tabbedPane != null) {
-            int tabCount = tabbedPane.getTabCount();
-
-            // Freeze/Unfreeze first 4 tabs
-            for (int i = 0; i < Math.min(tabCount, 4); i++) {
+            for (int i : WorkflowTabs.freezableTabIndices(tabbedPane)) {
                 Component tabComp = tabbedPane.getComponentAt(i);
                 if (tabComp instanceof Container) {
                     enableComponents((Container) tabComp, !frozen);

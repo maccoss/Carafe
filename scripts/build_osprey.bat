@@ -51,6 +51,12 @@ echo.
 if exist "%DEST%" rmdir /s /q "%DEST%"
 mkdir "%DEST%"
 
+REM Derive the MSBuild Platform from the RID architecture so an arm64 RID (e.g. win-arm64)
+REM is not published with a mismatched x64 Platform.
+set "PLATFORM=x64"
+echo %RID%| findstr /e "-arm64" >nul && set "PLATFORM=ARM64"
+echo %RID%| findstr /e "-x86" >nul && set "PLATFORM=x86"
+
 REM Do NOT use PublishSingleFile: Osprey's blib writer uses System.Data.SQLite,
 REM whose native SQLite.Interop.dll is located via the managed assembly's own directory.
 REM Under single-file publish Assembly.Location is empty, so the SQLiteConnection ctor
@@ -62,7 +68,7 @@ dotnet publish "%OSPREY_CSPROJ%" ^
     -r %RID% ^
     --self-contained true ^
     -p:PublishSingleFile=false ^
-    -p:Platform=x64 ^
+    -p:Platform=%PLATFORM% ^
     -o "%DEST%"
 
 if errorlevel 1 (

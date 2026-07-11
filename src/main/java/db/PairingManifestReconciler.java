@@ -121,6 +121,9 @@ public final class PairingManifestReconciler {
             int iProteins = columnIndex(header, "proteins", manifestIn);
             int iType = columnIndex(header, "peptide_type", manifestIn);
             int iPair = columnIndex(header, "peptide_pair_index", manifestIn);
+            // Guard against the highest column index we actually read, not just peptide_pair_index —
+            // columns are resolved by name, so any of them could be the last field in a reordered header.
+            int maxIdx = Math.max(Math.max(Math.max(iSeq, iDecoy), Math.max(iProteins, iType)), iPair);
             String line;
             int lineNo = 1; // header consumed above
             while ((line = br.readLine()) != null) {
@@ -129,10 +132,10 @@ public final class PairingManifestReconciler {
                     continue;
                 }
                 String[] c = line.split("\t", -1);
-                if (c.length <= iPair) {
+                if (c.length <= maxIdx) {
                     // Fail loudly rather than silently dropping a peptide/group from a corrupt manifest.
                     throw new IOException("malformed manifest " + manifestIn + " at line " + lineNo
-                            + ": expected at least " + (iPair + 1) + " tab-separated columns, found "
+                            + ": expected at least " + (maxIdx + 1) + " tab-separated columns, found "
                             + c.length);
                 }
                 r.rowsIn++;
