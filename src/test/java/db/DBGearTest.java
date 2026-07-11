@@ -67,7 +67,7 @@ public class DBGearTest {
         DBGear.init_enzymes();
         permissiveDigestParams();
         DBGear g = new DBGear();
-        Enzyme trypsin = DBGear.getEnzymeByIndex(1); // Trypsin
+        Enzyme trypsin = DBGear.getEnzymeByIndex(DBGear.getEnzymeIndexByName("Trypsin"));
         // Protein starts with M (real initiator) and also contains an INTERNAL M-starting peptide.
         Set<String> peptides = g.digest_protein(trypsin, "MAAAAAKMPEPTIDEK");
         Assert.assertTrue(peptides.contains("MAAAAAK"), "leading peptide retained");

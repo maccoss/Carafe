@@ -169,4 +169,29 @@ public class PairingManifestReconcilerTest {
         Assert.assertFalse(keptSeqs.contains("TARGETTWOR"));
         Assert.assertFalse(keptSeqs.contains("DECOYTWOR"));
     }
+
+    @Test(expectedExceptions = IOException.class)
+    public void failsFastOnMalformedManifestRow() throws IOException {
+        // A truncated manifest row must fail loudly, not silently drop the peptide/group.
+        String manifest = "sequence\tdecoy\tproteins\tpeptide_type\tpeptide_pair_index\n"
+                + "TARGETONER\tNo\tsp|P1\ttarget\t0\n"
+                + "TRUNCATED_ROW\n";
+        String library = "ModifiedPeptide\tStrippedPeptide\n_TARGETONER_\tTARGETONER\n";
+        Path manIn = writeTsv("recon_bad_man", manifest);
+        Path lib = writeTsv("recon_ok_lib", library);
+        Path manOut = Files.createTempFile("recon_out_badman", ".tsv");
+        PairingManifestReconciler.run(manIn.toString(), lib.toString(), manOut.toString());
+    }
+
+    @Test(expectedExceptions = IOException.class)
+    public void failsFastOnMalformedLibraryRow() throws IOException {
+        // A library row missing the StrippedPeptide column would undercount the library; fail fast.
+        String manifest = "sequence\tdecoy\tproteins\tpeptide_type\tpeptide_pair_index\n"
+                + "TARGETONER\tNo\tsp|P1\ttarget\t0\n";
+        String library = "ModifiedPeptide\tStrippedPeptide\n_ONLY_ONE_COLUMN_\n";
+        Path manIn = writeTsv("recon_ok_man", manifest);
+        Path lib = writeTsv("recon_bad_lib", library);
+        Path manOut = Files.createTempFile("recon_out_badlib", ".tsv");
+        PairingManifestReconciler.run(manIn.toString(), lib.toString(), manOut.toString());
+    }
 }

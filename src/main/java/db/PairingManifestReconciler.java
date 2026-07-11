@@ -121,13 +121,18 @@ public final class PairingManifestReconciler {
             int iType = columnIndex(header, "peptide_type", manifestIn);
             int iPair = columnIndex(header, "peptide_pair_index", manifestIn);
             String line;
+            int lineNo = 1; // header consumed above
             while ((line = br.readLine()) != null) {
+                lineNo++;
                 if (line.isEmpty()) {
                     continue;
                 }
                 String[] c = line.split("\t", -1);
                 if (c.length <= iPair) {
-                    continue;
+                    // Fail loudly rather than silently dropping a peptide/group from a corrupt manifest.
+                    throw new IOException("malformed manifest " + manifestIn + " at line " + lineNo
+                            + ": expected at least " + (iPair + 1) + " tab-separated columns, found "
+                            + c.length);
                 }
                 r.rowsIn++;
                 groups.computeIfAbsent(c[iPair], k -> new ArrayList<>())
@@ -224,14 +229,20 @@ public final class PairingManifestReconciler {
             String[] header = headerLine.split("\t", -1);
             int iSeq = columnIndex(header, LIBRARY_SEQUENCE_COLUMN, library);
             String line;
+            int lineNo = 1; // header consumed above
             while ((line = br.readLine()) != null) {
+                lineNo++;
                 if (line.isEmpty()) {
                     continue;
                 }
                 String[] c = line.split("\t", -1);
-                if (c.length > iSeq) {
-                    sequences.add(normalize(c[iSeq]));
+                if (c.length <= iSeq) {
+                    // A short row would silently undercount the library and over-prune the manifest.
+                    throw new IOException("malformed library " + library + " at line " + lineNo
+                            + ": missing the " + LIBRARY_SEQUENCE_COLUMN + " column (found " + c.length
+                            + " tab-separated columns)");
                 }
+                sequences.add(normalize(c[iSeq]));
             }
         }
         return sequences;
