@@ -83,4 +83,50 @@ public final class CarafeLibraryStaging {
         }
         return published;
     }
+
+    /**
+     * Local staging directory for a library step, under {@code java.io.tmpdir} and keyed on a hash of
+     * its final directory, so the initial and fine-tuned libraries (and the train vs project searches)
+     * never collide. Pure path computation - no filesystem side effects.
+     */
+    public static File stageDirFor(String finalDir) {
+        return new File(System.getProperty("java.io.tmpdir"),
+                "carafe_lib_stage" + File.separator + Integer.toHexString(finalDir.hashCode()));
+    }
+
+    /**
+     * {@link #stageDirFor(String)}, created and cleared of any previous run's top-level files, so the
+     * post-step publish sees only files produced by THIS run (and a shorter chunk list can't read a
+     * previous run's stale {@code peptide_forms_*.parquet}). Mirrors the Osprey blib staging.
+     */
+    public static File freshStageDir(String finalDir) {
+        File d = stageDirFor(finalDir);
+        d.mkdirs();
+        deleteTopLevel(d);
+        return d;
+    }
+
+    /**
+     * {@link #publish(File, File)}, then delete whatever remains in {@code stageDir} - i.e. the
+     * prediction scratch publish() intentionally left behind - so it never touches the network and does
+     * not accumulate on local disk between runs.
+     *
+     * @return the number of deliverables published to {@code finalDir}
+     * @throws IOException if {@code stageDir} is missing or empty (the step produced no output)
+     */
+    public static int publishAndCleanScratch(File stageDir, File finalDir) throws IOException {
+        int published = publish(stageDir, finalDir);
+        deleteTopLevel(stageDir);
+        return published;
+    }
+
+    /** Delete the top-level files in {@code dir} (leaves any sub-directories, which steps don't write). */
+    private static void deleteTopLevel(File dir) {
+        File[] entries = dir.listFiles();
+        if (entries != null) {
+            for (File f : entries) {
+                f.delete();
+            }
+        }
+    }
 }

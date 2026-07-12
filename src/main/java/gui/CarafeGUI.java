@@ -154,45 +154,17 @@ public class CarafeGUI extends JFrame {
     }
 
     /**
-     * Local staging directory for a Carafe library step, keyed on its final (network) directory so the
-     * initial and fine-tuned libraries never collide. Cleared first so the post-step publish sees only
-     * files produced by THIS run (and so a shorter chunk list can't read a previous run's stale
-     * {@code peptide_forms_*.parquet}). Mirrors the Osprey blib staging.
-     */
-    private String freshCarafeStageDir(String finalDir) {
-        String stageDir = new File(System.getProperty("java.io.tmpdir"),
-                "carafe_lib_stage" + File.separator + Integer.toHexString(finalDir.hashCode()))
-                .getAbsolutePath();
-        File d = new File(stageDir);
-        d.mkdirs();
-        File[] stale = d.listFiles();
-        if (stale != null) {
-            for (File s : stale) {
-                s.delete();
-            }
-        }
-        return stageDir;
-    }
-
-    /**
      * Attach a post-success hook that publishes a Carafe library step's deliverables from its local
      * staging directory to {@code finalDir} (see {@link CarafeLibraryStaging}). Runs only on a clean
      * exit and before the reuse signature is written, so the reused {@code skip_check_file} (on the
-     * share) exists by the time it is signed. The bulky prediction parquet is left on local disk and
-     * removed here so it never touches the network and does not accumulate between runs.
+     * share) exists by the time it is signed. The bulky prediction parquet is left off the network and
+     * removed from local disk so it does not accumulate between runs.
      */
     private void stageCarafeLibraryLocally(CmdTask task, String stageDir, String finalDir) {
         final String fStage = stageDir;
         final String fFinal = finalDir;
         task.postAction = () -> {
-            int published = CarafeLibraryStaging.publish(new File(fStage), new File(fFinal));
-            File stage = new File(fStage);
-            File[] leftover = stage.listFiles();
-            if (leftover != null) {
-                for (File f : leftover) {
-                    f.delete();
-                }
-            }
+            int published = CarafeLibraryStaging.publishAndCleanScratch(new File(fStage), new File(fFinal));
             logToConsole("[Carafe] Published " + published + " library file(s) from local staging to "
                     + fFinal + " (kept the peptide_forms parquet scratch on local disk).\n");
         };
@@ -5288,7 +5260,7 @@ public class CarafeGUI extends JFrame {
                     // (which crashed the predictor over SMB) never touches the share.
                     String lib1FinalDir = new File(lib1Tsv).getParent();
                     String lib1StageDir = CarafeLibraryStaging.isNetworkOutputPath(outDir)
-                            ? freshCarafeStageDir(lib1FinalDir) : null;
+                            ? CarafeLibraryStaging.freshStageDir(lib1FinalDir).getAbsolutePath() : null;
                     carafeStageDirOverride = lib1StageDir;
                     lib1 = buildCarafeCommand("", false); // empty -ms => library only
                     clearCarafeOverrides();
@@ -5350,7 +5322,7 @@ public class CarafeGUI extends JFrame {
                 // off SMB and, critically, writes the BiblioSpec .blib (SQLite) to local disk before
                 // copying it to the share - SQLite cannot create/lock a database over SMB.
                 String lib2StageDir = CarafeLibraryStaging.isNetworkOutputPath(outDir)
-                        ? freshCarafeStageDir(newLibDir) : null;
+                        ? CarafeLibraryStaging.freshStageDir(newLibDir).getAbsolutePath() : null;
                 carafeStageDirOverride = lib2StageDir;
                 CmdTask lib2 = buildCarafeCommand(trainMsInput, isTimsTOF);
                 clearCarafeOverrides();
