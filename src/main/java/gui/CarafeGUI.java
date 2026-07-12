@@ -136,6 +136,11 @@ public class CarafeGUI extends JFrame {
     private String carafeEnzymeOverride = null;     // -enzyme value (e.g. "NoCut")
     private String carafeSeOverride = null;         // -se value (e.g. "Osprey")
     private String carafeLfTypeOverride = null;     // -lf_type value (e.g. "DIA-NN")
+    // Absolute LOCAL directory the Carafe process writes to (-o), while out_dir/out_files/skip_check
+    // still reference the final (possibly network) directory. Set only for the Osprey library steps
+    // so their heavy parquet/model/blib churn stays off the SMB share; a postAction publishes the
+    // deliverables to the final directory. Null => write straight to the final directory (workflows 1-3).
+    private String carafeStageDirOverride = null;
 
     /** Reset all per-step Carafe command overrides back to default (DIA-NN-workflow) behavior. */
     private void clearCarafeOverrides() {
@@ -145,6 +150,52 @@ public class CarafeGUI extends JFrame {
         carafeEnzymeOverride = null;
         carafeSeOverride = null;
         carafeLfTypeOverride = null;
+        carafeStageDirOverride = null;
+    }
+
+    /**
+     * Local staging directory for a Carafe library step, keyed on its final (network) directory so the
+     * initial and fine-tuned libraries never collide. Cleared first so the post-step publish sees only
+     * files produced by THIS run (and so a shorter chunk list can't read a previous run's stale
+     * {@code peptide_forms_*.parquet}). Mirrors the Osprey blib staging.
+     */
+    private String freshCarafeStageDir(String finalDir) {
+        String stageDir = new File(System.getProperty("java.io.tmpdir"),
+                "carafe_lib_stage" + File.separator + Integer.toHexString(finalDir.hashCode()))
+                .getAbsolutePath();
+        File d = new File(stageDir);
+        d.mkdirs();
+        File[] stale = d.listFiles();
+        if (stale != null) {
+            for (File s : stale) {
+                s.delete();
+            }
+        }
+        return stageDir;
+    }
+
+    /**
+     * Attach a post-success hook that publishes a Carafe library step's deliverables from its local
+     * staging directory to {@code finalDir} (see {@link CarafeLibraryStaging}). Runs only on a clean
+     * exit and before the reuse signature is written, so the reused {@code skip_check_file} (on the
+     * share) exists by the time it is signed. The bulky prediction parquet is left on local disk and
+     * removed here so it never touches the network and does not accumulate between runs.
+     */
+    private void stageCarafeLibraryLocally(CmdTask task, String stageDir, String finalDir) {
+        final String fStage = stageDir;
+        final String fFinal = finalDir;
+        task.postAction = () -> {
+            int published = CarafeLibraryStaging.publish(new File(fStage), new File(fFinal));
+            File stage = new File(fStage);
+            File[] leftover = stage.listFiles();
+            if (leftover != null) {
+                for (File f : leftover) {
+                    f.delete();
+                }
+            }
+            logToConsole("[Carafe] Published " + published + " library file(s) from local staging to "
+                    + fFinal + " (kept the peptide_forms parquet scratch on local disk).\n");
+        };
     }
 
     // Multi-file selection storage
@@ -4144,17 +4195,15 @@ public class CarafeGUI extends JFrame {
 
         String outSubdir = carafeOutSubdirOverride != null ? carafeOutSubdirOverride : "carafe_library";
         String outDir = outputDirField.getText().trim();
-        if (!outDir.isEmpty()) {
-            carafe_library_directory = outDir + File.separator + outSubdir;
-            // cmd.append("-o \"").append(carafe_library_directory).append("\" ");
-            commandArgs.add("-o");
-            commandArgs.add(carafe_library_directory);
-            // commandArgs.add("\"" + carafe_library_directory + "\"");
-        }else{
-            carafe_library_directory = outSubdir;
-            commandArgs.add("-o");
-            commandArgs.add(carafe_library_directory);
-        }
+        // carafe_library_directory is the FINAL directory that out_dir/out_files/skip_check reference.
+        carafe_library_directory = !outDir.isEmpty() ? outDir + File.separator + outSubdir : outSubdir;
+        // The directory the Carafe process actually writes to (-o). Normally the same as the final
+        // directory, but the Osprey steps stage on local disk (carafeStageDirOverride) to keep the
+        // heavy prediction parquet, model, and SQLite .blib churn off the network share; a postAction
+        // then publishes the finished library + report/model artifacts to carafe_library_directory.
+        String workLibDir = carafeStageDirOverride != null ? carafeStageDirOverride : carafe_library_directory;
+        commandArgs.add("-o");
+        commandArgs.add(workLibDir);
 
         // cmd.append("-fdr ").append(fdrSpinner.getValue()).append(" ");
         commandArgs.add("-fdr");
@@ -5234,10 +5283,20 @@ public class CarafeGUI extends JFrame {
                     carafeOutSubdirOverride = "osprey_initial_library";
                     carafeLfTypeOverride = "DIA-NN";
                     carafeSeOverride = "Osprey";
+                    // On a network output share, run the ~2.3M-peptide prediction on local disk and
+                    // publish only the finished library, so the per-chunk peptide_forms parquet churn
+                    // (which crashed the predictor over SMB) never touches the share.
+                    String lib1FinalDir = new File(lib1Tsv).getParent();
+                    String lib1StageDir = CarafeLibraryStaging.isNetworkOutputPath(outDir)
+                            ? freshCarafeStageDir(lib1FinalDir) : null;
+                    carafeStageDirOverride = lib1StageDir;
                     lib1 = buildCarafeCommand("", false); // empty -ms => library only
                     clearCarafeOverrides();
                     if (lib1 != null) {
                         lib1.task_description = "Carafe: build initial target-decoy library (NoCut)";
+                        if (lib1StageDir != null) {
+                            stageCarafeLibraryLocally(lib1, lib1StageDir, lib1FinalDir);
+                        }
                     }
                 }
                 if (lib1 == null) {
@@ -5287,6 +5346,12 @@ public class CarafeGUI extends JFrame {
                 carafeSeOverride = "Osprey";
                 carafeOutSubdirOverride = "osprey_new_library";
                 carafeLfTypeOverride = libPlan.lfType;
+                // Stage the fine-tune + prediction locally on a network share: keeps the parquet churn
+                // off SMB and, critically, writes the BiblioSpec .blib (SQLite) to local disk before
+                // copying it to the share - SQLite cannot create/lock a database over SMB.
+                String lib2StageDir = CarafeLibraryStaging.isNetworkOutputPath(outDir)
+                        ? freshCarafeStageDir(newLibDir) : null;
+                carafeStageDirOverride = lib2StageDir;
                 CmdTask lib2 = buildCarafeCommand(trainMsInput, isTimsTOF);
                 clearCarafeOverrides();
                 if (lib2 == null) {
@@ -5316,6 +5381,12 @@ public class CarafeGUI extends JFrame {
                                             + ") needed for the Osprey project search."
                                     : ".")
                             + "\n");
+                }
+                // Publish the fine-tuned library (+ report/models) from local staging to the share once
+                // the step exits cleanly. Attached after out_files are finalized so the summary and the
+                // reuse-skip both key on the published (network) paths.
+                if (lib2StageDir != null) {
+                    stageCarafeLibraryLocally(lib2, lib2StageDir, newLibDir);
                 }
 
                 // Reconcile the library manifest to the peptides actually in the finetuned library, so
