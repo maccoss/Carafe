@@ -391,6 +391,14 @@ public class AIGear {
     public String db = "";
 
     /**
+     * Optional FDRBench-style pairing manifest ({@code sequence, decoy, proteins, peptide_type,
+     * peptide_pair_index}). When set on the Skyline ({@code .blib}) library path, its target/decoy
+     * pairing is written into the blib as the additive {@code DecoyPairs} table (see
+     * {@link main.java.db.DecoyPairPlanner}). Empty for every other path, so their blibs are unchanged.
+     */
+    public String pairing_manifest = "";
+
+    /**
      * The path of python executable to use for model training and prediction.
      */
     private String python_bin = "python";
@@ -662,6 +670,9 @@ public class AIGear {
         options.addOption("printPTM",false,"Print all supported PTMs");
         options.addOption("db", true, "Protein database");
         options.addOption("o", true, "Output directory");
+        options.addOption("pairing_manifest", true, "FDRBench pairing manifest (sequence, decoy, "
+                + "proteins, peptide_type, peptide_pair_index); when set, the Skyline .blib gets a "
+                + "DecoyPairs table linking each target to its paired decoy");
         // options.addOption("tol", true, "Fragment ion m/z tolerance in Da, default is 0.6");
         // options.addOption("tolu", true, "Fragment ion m/z tolerance in Da, default is 0.6");
         options.addOption("itol", true, "Fragment ion m/z tolerance in ppm, default is 20");
@@ -1141,6 +1152,10 @@ public class AIGear {
 
         if (cmd.hasOption("db")) {
             aiGear.db = cmd.getOptionValue("db");
+        }
+
+        if (cmd.hasOption("pairing_manifest")) {
+            aiGear.pairing_manifest = cmd.getOptionValue("pairing_manifest");
         }
 
         if (cmd.hasOption("se")) {
@@ -13133,6 +13148,12 @@ public class AIGear {
         LibFragment libFragment = new LibFragment();
         int RefSpectraID = 0;
         int i_batch = 0;
+        // When a pairing manifest is supplied (Skyline .blib target/decoy library), remember each
+        // written RefSpectra row so a DecoyPairs table can be added below. RefSpectraID mirrors the
+        // AUTOINCREMENT id because the table is freshly created and rows are inserted in this order.
+        boolean addDecoyPairs = this.pairing_manifest != null && !this.pairing_manifest.isBlank();
+        java.util.List<main.java.db.DecoyPairPlanner.Precursor> decoyPrecursors =
+                addDecoyPairs ? new java.util.ArrayList<>() : null;
         for (String i : res_files.keySet()) {
             Cloger.getInstance().logger.info(i);
             String ms2_file = res_files.get(i).get("ms2");
@@ -13256,6 +13277,10 @@ public class AIGear {
                 libFragment.ModifiedPeptide = mod_pep;
                 RefSpectraID++;
                 i_batch++;
+                if (addDecoyPairs) {
+                    decoyPrecursors.add(new main.java.db.DecoyPairPlanner.Precursor(
+                            RefSpectraID, sequence, charge, main.java.db.DecoyPairPlanner.modKey(mods)));
+                }
                 try {
                     skylineIO.pStatementRefSpectra.setString(1, sequence); // peptideSeq VARCHAR(150)
                     skylineIO.pStatementRefSpectra.setDouble(2, mz); // precursorMZ REAL
@@ -13344,6 +13369,34 @@ public class AIGear {
             i_batch = 0;
         }
         skylineIO.numSpectra = RefSpectraID;
+        // Additive, Skyline-neutral target/decoy pairing (in the same transaction as the library, so it
+        // is committed atomically with it). Populated from the pairing manifest joined to the rows just
+        // written; only pairs whose target AND decoy precursor made it into the library are emitted.
+        if (addDecoyPairs) {
+            try {
+                java.util.List<main.java.db.DecoyPairPlanner.ManifestEntry> manifestRows =
+                        main.java.db.DecoyPairPlanner.parseManifest(new File(this.pairing_manifest));
+                java.util.List<main.java.db.DecoyPairPlanner.DecoyPair> pairs =
+                        main.java.db.DecoyPairPlanner.plan(decoyPrecursors, manifestRows);
+                skylineIO.create_DecoyPairs();
+                for (main.java.db.DecoyPairPlanner.DecoyPair p : pairs) {
+                    skylineIO.pStatementDecoyPairs.setInt(1, p.refSpectraId());
+                    skylineIO.pStatementDecoyPairs.setInt(2, p.isDecoy());
+                    skylineIO.pStatementDecoyPairs.setInt(3, p.pairId());
+                    if (p.method() == null) {
+                        skylineIO.pStatementDecoyPairs.setNull(4, Types.VARCHAR);
+                    } else {
+                        skylineIO.pStatementDecoyPairs.setString(4, p.method());
+                    }
+                    skylineIO.pStatementDecoyPairs.addBatch();
+                }
+                skylineIO.pStatementDecoyPairs.executeBatch();
+                Cloger.getInstance().logger.info("DecoyPairs: wrote " + pairs.size() + " rows ("
+                        + (pairs.size() / 2) + " target/decoy pairs) from manifest " + this.pairing_manifest);
+            } catch (Exception e) {
+                Cloger.getInstance().logger.error("Failed to write DecoyPairs table: " + e.getMessage());
+            }
+        }
         skylineIO.add_LibInfo();
         skylineIO.add_index();
         skylineIO.connection.commit(); // Commit the transaction, making all changes permanent
@@ -13750,10 +13803,15 @@ public class AIGear {
      *
      * @param residue The character representing the residue.
      * @param deltaMass The delta mass associated with the residue, provided as a BigDecimal.
-     * @return A formatted string combining the residue and the delta mass in the form "residue[deltaMass]".
+     * @return A formatted string combining the residue and the delta mass in the form "residue[+deltaMass]".
      */
     private String format_skyline_residue(char residue, BigDecimal deltaMass) {
-        return residue + "[" + deltaMass.stripTrailingZeros().toPlainString() + "]";
+        // Skyline's modified-sequence convention is a SIGNED delta mass (e.g. C[+57.02146372057]).
+        // Without the '+', a downstream string join of the blib's peptideModSeq against a Skyline
+        // PeptideModifiedSequence export silently misses every modified peptide. Skyline itself matches
+        // library entries by computed mass, so full precision is retained (the sign is the essential fix).
+        String sign = deltaMass.signum() >= 0 ? "+" : "";
+        return residue + "[" + sign + deltaMass.stripTrailingZeros().toPlainString() + "]";
     }
 
     /**

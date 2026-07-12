@@ -270,4 +270,53 @@ public class SkylineIOTest {
         }
         return f;
     }
+
+    /**
+     * The additive DecoyPairs table round-trips: a target row (NULL Method) and its decoy row (Method
+     * set) sharing a PairID, plus the PairID index. This is the self-describing pairing Skyline ignores.
+     */
+    @Test
+    public void testDecoyPairsTableRoundTrip() throws Exception {
+        Path dbPath = Files.createTempFile("decoypairs", ".blib");
+        Files.deleteIfExists(dbPath); // SkylineIO creates the file fresh
+        try {
+            SkylineIO io = new SkylineIO(dbPath.toString());
+            io.create_DecoyPairs();
+            io.pStatementDecoyPairs.setInt(1, 10);
+            io.pStatementDecoyPairs.setInt(2, 0);
+            io.pStatementDecoyPairs.setInt(3, 1);
+            io.pStatementDecoyPairs.setNull(4, Types.VARCHAR);
+            io.pStatementDecoyPairs.addBatch();
+            io.pStatementDecoyPairs.setInt(1, 11);
+            io.pStatementDecoyPairs.setInt(2, 1);
+            io.pStatementDecoyPairs.setInt(3, 1);
+            io.pStatementDecoyPairs.setString(4, "reverse");
+            io.pStatementDecoyPairs.addBatch();
+            io.pStatementDecoyPairs.executeBatch();
+            io.close();
+
+            try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement st = c.createStatement()) {
+                ResultSet rs = st.executeQuery(
+                        "SELECT RefSpectraID, IsDecoy, PairID, Method FROM DecoyPairs ORDER BY RefSpectraID");
+                Assert.assertTrue(rs.next());
+                Assert.assertEquals(rs.getInt("RefSpectraID"), 10);
+                Assert.assertEquals(rs.getInt("IsDecoy"), 0);
+                Assert.assertEquals(rs.getInt("PairID"), 1);
+                Assert.assertNull(rs.getString("Method"), "target row has NULL Method");
+                Assert.assertTrue(rs.next());
+                Assert.assertEquals(rs.getInt("RefSpectraID"), 11);
+                Assert.assertEquals(rs.getInt("IsDecoy"), 1);
+                Assert.assertEquals(rs.getInt("PairID"), 1, "the decoy shares the target's PairID");
+                Assert.assertEquals(rs.getString("Method"), "reverse");
+                Assert.assertFalse(rs.next(), "exactly two rows");
+
+                ResultSet idx = st.executeQuery(
+                        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_DecoyPairs_PairID'");
+                Assert.assertTrue(idx.next(), "the PairID index is created");
+            }
+        } finally {
+            Files.deleteIfExists(dbPath);
+        }
+    }
 }
