@@ -58,6 +58,8 @@ public class DecoyPairPlannerTest {
         Assert.assertEquals(m.get(2).isDecoy(), 1, "decoy row");
         Assert.assertEquals(m.get(2).method(), "reverse", "decoy is the C-term-preserved reverse");
         Assert.assertEquals(m.get(1).pairId(), m.get(2).pairId(), "target and decoy share a PairID");
+        Assert.assertEquals(m.get(1).isEntrapment(), 0, "a real target/decoy pair is not entrapment");
+        Assert.assertEquals(m.get(2).isEntrapment(), 0);
     }
 
     @Test
@@ -138,6 +140,11 @@ public class DecoyPairPlannerTest {
         Assert.assertNotEquals(m.get(1).pairId(), m.get(3).pairId(), "the two side pairs are distinct");
         Assert.assertEquals(m.get(3).isDecoy(), 0, "p_target is a target-side (decoy=No) row");
         Assert.assertEquals(m.get(4).isDecoy(), 1, "p_decoy is a decoy-side row");
+        // IsEntrapment is orthogonal to IsDecoy: the real pair is not entrapment, the p_ pair is.
+        Assert.assertEquals(m.get(1).isEntrapment(), 0, "real target is not entrapment");
+        Assert.assertEquals(m.get(2).isEntrapment(), 0, "real decoy is not entrapment");
+        Assert.assertEquals(m.get(3).isEntrapment(), 1, "p_target is an entrapment peptide");
+        Assert.assertEquals(m.get(4).isEntrapment(), 1, "p_decoy is an entrapment peptide");
     }
 
     @Test

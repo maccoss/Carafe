@@ -382,12 +382,14 @@ public class SkylineIO {
             String createTableSQL = "CREATE TABLE DecoyPairs ("
                     + "RefSpectraID INTEGER NOT NULL PRIMARY KEY, " // FK -> RefSpectra.id
                     + "IsDecoy INTEGER NOT NULL, "                  // 0 = target, 1 = decoy
+                    + "IsEntrapment INTEGER NOT NULL, "             // 1 = FDRBench entrapment peptide (p_target/p_decoy)
                     + "PairID INTEGER NOT NULL, "                   // target and its paired decoy share this
                     + "Method TEXT"                                 // how the decoy was built; NULL on target rows
                     + ");";
             statement.executeUpdate(createTableSQL);
             statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_DecoyPairs_PairID ON DecoyPairs(PairID);");
-            String insertSQL = "INSERT INTO DecoyPairs (RefSpectraID, IsDecoy, PairID, Method) VALUES (?, ?, ?, ?);";
+            String insertSQL = "INSERT INTO DecoyPairs (RefSpectraID, IsDecoy, IsEntrapment, PairID, Method) "
+                    + "VALUES (?, ?, ?, ?, ?);";
             pStatementDecoyPairs = connection.prepareStatement(insertSQL);
         } catch (Exception e) {
             System.out.println("Error creating DecoyPairs table: " + e.getMessage());

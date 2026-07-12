@@ -88,14 +88,18 @@ chromatogram/report exports) and pick whichever rounding matches your target Sky
    cases now assert the `+` form).
 
 2. **`DecoyPairs` table.** The Skyline `.blib` now carries the additive, Skyline-neutral `DecoyPairs`
-   table from the spec (`RefSpectraID PRIMARY KEY, IsDecoy, PairID, Method` + a `PairID` index), written
+   table (`RefSpectraID PRIMARY KEY, IsDecoy, IsEntrapment, PairID, Method` + a `PairID` index), written
    in the same transaction as the library:
    - `main.java.db.DecoyPairPlanner` joins the pairing manifest to the `RefSpectra` rows actually written
      (by I&rarr;L-normalized stripped sequence), pairing a target precursor with its decoy at the same
      charge and modification set; only pairs whose target **and** decoy are present are emitted.
      `IsDecoy` comes from the manifest `decoy` column; `Method` is `reverse`/`cycle` inferred from
-     `EntrapmentFastaGear.reversePreservingCterm`; entrapment quartets pair `target`&harr;`decoy` and
-     `p_target`&harr;`p_decoy`. Unit-tested in `DecoyPairPlannerTest` and `SkylineIOTest`.
+     `EntrapmentFastaGear.reversePreservingCterm`. Unit-tested in `DecoyPairPlannerTest` and `SkylineIOTest`.
+   - **Entrapment.** Osprey scores an entrapment target (`p_target`) as a target and its entrapment
+     decoy (`p_decoy`) as a decoy, and carries the pairing forward — so every target, real or
+     entrapment, has a paired decoy. `DecoyPairs` reflects this: it pairs both `target`&harr;`decoy` and
+     `p_target`&harr;`p_decoy`, and the `IsEntrapment` column (orthogonal to `IsDecoy`) flags the
+     entrapment peptides so follow-on tools can score performance against the entrapment set.
    - `SkylineIO.create_DecoyPairs()` creates/inserts the table; `AIGear` populates it when a
      `-pairing_manifest` is supplied (the Osprey Workflow 4/5 Skyline path passes the prelim manifest).
      It is regenerated whenever Carafe writes the `.blib`; Skyline does not round-trip it (see the spec's

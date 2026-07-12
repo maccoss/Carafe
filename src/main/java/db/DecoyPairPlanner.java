@@ -27,6 +27,10 @@ import java.util.TreeMap;
  * <ul>
  *   <li>One row per participating precursor ({@code peptideModSeq} + charge). {@code IsDecoy} 0/1 comes
  *       straight from the manifest's {@code decoy} column (target/p_target = 0; decoy/p_decoy = 1).</li>
+ *   <li>{@code IsEntrapment} 0/1 is orthogonal to {@code IsDecoy} and marks FDRBench entrapment
+ *       peptides ({@code p_target}/{@code p_decoy} = 1; real {@code target}/{@code decoy} = 0). Osprey
+ *       scores an entrapment target as a target and its entrapment decoy as a decoy; this flag carries
+ *       that annotation forward so follow-on tools can measure performance against the entrapment set.</li>
  *   <li>A target precursor is paired with its decoy precursor <b>at the same charge and with the same
  *       modification set</b>, so an Oxidation-M isoform pairs with the decoy's matching isoform. When a
  *       charge/mod bucket has several equivalent precursors on each side (e.g. two oxidised Met sites)
@@ -53,7 +57,7 @@ public final class DecoyPairPlanner {
     }
 
     /** A planned {@code DecoyPairs} row: {@code method} is null on target rows. */
-    public record DecoyPair(int refSpectraId, int isDecoy, int pairId, String method) {
+    public record DecoyPair(int refSpectraId, int isDecoy, int isEntrapment, int pairId, String method) {
     }
 
     /**
@@ -101,14 +105,14 @@ public final class DecoyPairPlanner {
         int[] nextPairId = {1};
         for (Map<String, String> g : groups.values()) {
             // The primary target/decoy pair and, for entrapment quartets, the p_target/p_decoy pair.
-            emitSidePair(g.get("target"), g.get("decoy"), bySeq, out, nextPairId);
-            emitSidePair(g.get("p_target"), g.get("p_decoy"), bySeq, out, nextPairId);
+            emitSidePair(g.get("target"), g.get("decoy"), false, bySeq, out, nextPairId);
+            emitSidePair(g.get("p_target"), g.get("p_decoy"), true, bySeq, out, nextPairId);
         }
         return out;
     }
 
     /** Emit pairs for one target-side / decoy-side sequence pairing within a manifest group. */
-    private static void emitSidePair(String targetSeq, String decoySeq,
+    private static void emitSidePair(String targetSeq, String decoySeq, boolean entrapment,
                                      Map<String, List<Precursor>> bySeq,
                                      List<DecoyPair> out, int[] nextPairId) {
         if (targetSeq == null || decoySeq == null) {
@@ -132,11 +136,12 @@ public final class DecoyPairPlanner {
             List<Precursor> ts = te.getValue();
             ts.sort(Comparator.comparingInt(Precursor::refSpectraId));
             ds.sort(Comparator.comparingInt(Precursor::refSpectraId));
+            int ent = entrapment ? 1 : 0;
             int n = Math.min(ts.size(), ds.size());
             for (int i = 0; i < n; i++) {
                 int pairId = nextPairId[0]++;
-                out.add(new DecoyPair(ts.get(i).refSpectraId(), 0, pairId, null));
-                out.add(new DecoyPair(ds.get(i).refSpectraId(), 1, pairId, method));
+                out.add(new DecoyPair(ts.get(i).refSpectraId(), 0, ent, pairId, null));
+                out.add(new DecoyPair(ds.get(i).refSpectraId(), 1, ent, pairId, method));
             }
         }
     }

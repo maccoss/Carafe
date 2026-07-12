@@ -13382,11 +13382,12 @@ public class AIGear {
                 for (main.java.db.DecoyPairPlanner.DecoyPair p : pairs) {
                     skylineIO.pStatementDecoyPairs.setInt(1, p.refSpectraId());
                     skylineIO.pStatementDecoyPairs.setInt(2, p.isDecoy());
-                    skylineIO.pStatementDecoyPairs.setInt(3, p.pairId());
+                    skylineIO.pStatementDecoyPairs.setInt(3, p.isEntrapment());
+                    skylineIO.pStatementDecoyPairs.setInt(4, p.pairId());
                     if (p.method() == null) {
-                        skylineIO.pStatementDecoyPairs.setNull(4, Types.VARCHAR);
+                        skylineIO.pStatementDecoyPairs.setNull(5, Types.VARCHAR);
                     } else {
-                        skylineIO.pStatementDecoyPairs.setString(4, p.method());
+                        skylineIO.pStatementDecoyPairs.setString(5, p.method());
                     }
                     skylineIO.pStatementDecoyPairs.addBatch();
                 }

@@ -272,8 +272,9 @@ public class SkylineIOTest {
     }
 
     /**
-     * The additive DecoyPairs table round-trips: a target row (NULL Method) and its decoy row (Method
-     * set) sharing a PairID, plus the PairID index. This is the self-describing pairing Skyline ignores.
+     * The additive DecoyPairs table round-trips: an entrapment target row (NULL Method, IsEntrapment=1)
+     * and its entrapment decoy row (Method set) sharing a PairID, plus the PairID index. This is the
+     * self-describing pairing + entrapment annotation Skyline ignores but follow-on tools consume.
      */
     @Test
     public void testDecoyPairsTableRoundTrip() throws Exception {
@@ -282,15 +283,19 @@ public class SkylineIOTest {
         try {
             SkylineIO io = new SkylineIO(dbPath.toString());
             io.create_DecoyPairs();
+            // entrapment target: IsDecoy=0, IsEntrapment=1, PairID=1, Method NULL
             io.pStatementDecoyPairs.setInt(1, 10);
             io.pStatementDecoyPairs.setInt(2, 0);
             io.pStatementDecoyPairs.setInt(3, 1);
-            io.pStatementDecoyPairs.setNull(4, Types.VARCHAR);
+            io.pStatementDecoyPairs.setInt(4, 1);
+            io.pStatementDecoyPairs.setNull(5, Types.VARCHAR);
             io.pStatementDecoyPairs.addBatch();
+            // entrapment decoy: IsDecoy=1, IsEntrapment=1, PairID=1, Method reverse
             io.pStatementDecoyPairs.setInt(1, 11);
             io.pStatementDecoyPairs.setInt(2, 1);
             io.pStatementDecoyPairs.setInt(3, 1);
-            io.pStatementDecoyPairs.setString(4, "reverse");
+            io.pStatementDecoyPairs.setInt(4, 1);
+            io.pStatementDecoyPairs.setString(5, "reverse");
             io.pStatementDecoyPairs.addBatch();
             io.pStatementDecoyPairs.executeBatch();
             io.close();
@@ -298,15 +303,18 @@ public class SkylineIOTest {
             try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
                  Statement st = c.createStatement()) {
                 ResultSet rs = st.executeQuery(
-                        "SELECT RefSpectraID, IsDecoy, PairID, Method FROM DecoyPairs ORDER BY RefSpectraID");
+                        "SELECT RefSpectraID, IsDecoy, IsEntrapment, PairID, Method FROM DecoyPairs "
+                                + "ORDER BY RefSpectraID");
                 Assert.assertTrue(rs.next());
                 Assert.assertEquals(rs.getInt("RefSpectraID"), 10);
                 Assert.assertEquals(rs.getInt("IsDecoy"), 0);
+                Assert.assertEquals(rs.getInt("IsEntrapment"), 1, "entrapment target");
                 Assert.assertEquals(rs.getInt("PairID"), 1);
                 Assert.assertNull(rs.getString("Method"), "target row has NULL Method");
                 Assert.assertTrue(rs.next());
                 Assert.assertEquals(rs.getInt("RefSpectraID"), 11);
                 Assert.assertEquals(rs.getInt("IsDecoy"), 1);
+                Assert.assertEquals(rs.getInt("IsEntrapment"), 1, "entrapment decoy");
                 Assert.assertEquals(rs.getInt("PairID"), 1, "the decoy shares the target's PairID");
                 Assert.assertEquals(rs.getString("Method"), "reverse");
                 Assert.assertFalse(rs.next(), "exactly two rows");
