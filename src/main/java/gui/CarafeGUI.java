@@ -136,6 +136,7 @@ public class CarafeGUI extends JFrame {
     private String carafeEnzymeOverride = null;     // -enzyme value (e.g. "NoCut")
     private String carafeSeOverride = null;         // -se value (e.g. "Osprey")
     private String carafeLfTypeOverride = null;     // -lf_type value (e.g. "DIA-NN")
+    private String carafePairingManifestOverride = null; // -pairing_manifest (Skyline blib DecoyPairs table)
     // Absolute LOCAL directory the Carafe process writes to (-o), while out_dir/out_files/skip_check
     // still reference the final (possibly network) directory. Set only for the Osprey library steps
     // so their heavy parquet/model/blib churn stays off the SMB share; a postAction publishes the
@@ -151,6 +152,7 @@ public class CarafeGUI extends JFrame {
         carafeSeOverride = null;
         carafeLfTypeOverride = null;
         carafeStageDirOverride = null;
+        carafePairingManifestOverride = null;
     }
 
     /**
@@ -4177,6 +4179,14 @@ public class CarafeGUI extends JFrame {
         commandArgs.add("-o");
         commandArgs.add(workLibDir);
 
+        // When writing a Skyline .blib target/decoy library, pass the pairing manifest so the blib gets
+        // the additive DecoyPairs table (linking each target to its paired decoy). Null on every other
+        // path, so their commands are unchanged.
+        if (carafePairingManifestOverride != null && !carafePairingManifestOverride.isEmpty()) {
+            commandArgs.add("-pairing_manifest");
+            commandArgs.add(carafePairingManifestOverride);
+        }
+
         // cmd.append("-fdr ").append(fdrSpinner.getValue()).append(" ");
         commandArgs.add("-fdr");
         commandArgs.add(fdrSpinner.getValue().toString());
@@ -5318,6 +5328,12 @@ public class CarafeGUI extends JFrame {
                 carafeSeOverride = "Osprey";
                 carafeOutSubdirOverride = "osprey_new_library";
                 carafeLfTypeOverride = libPlan.lfType;
+                // When the finetuned library is a Skyline .blib, pass the pairing manifest so the blib
+                // carries the DecoyPairs table. The prelim manifest is used (it exists before this step,
+                // and the blib writer only pairs precursors actually present in the library).
+                if (libPlan.blib) {
+                    carafePairingManifestOverride = man2Prelim;
+                }
                 // Stage the fine-tune + prediction locally on a network share: keeps the parquet churn
                 // off SMB and, critically, writes the BiblioSpec .blib (SQLite) to local disk before
                 // copying it to the share - SQLite cannot create/lock a database over SMB.
