@@ -128,6 +128,20 @@ jobs:
             pwiz_tools/Shared/Lib/Parquet
           sparse-checkout-cone-mode: false
 
+      # Repoint Osprey's 2nd-pass q-value default to protein-compact (frozen 1st-pass
+      # weights + protein-stratum competition, no retrain) for this installer. Osprey
+      # reads OSPREY_PASS2_QVALUE from the environment at process start, so a shipped
+      # MSI, run by collaborators who never set that var, gets the compiled UNSET
+      # default -- which is "percolator" (retrain) upstream. The script rewrites only
+      # that unset default and tripwires the OSPREY_PICK_LEGACY default so we cannot
+      # silently ship legacy peak picking instead of the improved LDA pick. It fails
+      # loudly if the Osprey source moved. See scripts/patch_osprey_pass2_default.ps1.
+      # OSPREY_PASS2_QVALUE / OSPREY_PICK_LEGACY are deliberately left UNSET in this
+      # job: they are runtime vars, so the build env has no effect on the shipped exe.
+      - name: Default Osprey 2nd-pass q-value to protein-compact
+        shell: pwsh
+        run: ./scripts/patch_osprey_pass2_default.ps1 -OspreyEnvPath pwiz/pwiz_tools/Osprey/Osprey.Core/OspreyEnvironment.cs
+
       # Publish a self-contained Osprey straight into the app directory so
       # jpackage's --input sweeps it into the MSI. resolveOspreyBinary() then finds
       # it at <appdir>/osprey/win-x64/Osprey.exe next to the jar.
