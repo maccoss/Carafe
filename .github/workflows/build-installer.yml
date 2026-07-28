@@ -128,19 +128,25 @@ jobs:
             pwiz_tools/Shared/Lib/Parquet
           sparse-checkout-cone-mode: false
 
-      # Repoint Osprey's 2nd-pass q-value default to protein-compact (frozen 1st-pass
-      # weights + protein-stratum competition, no retrain) for this installer. Osprey
-      # reads OSPREY_PASS2_QVALUE from the environment at process start, so a shipped
-      # MSI, run by collaborators who never set that var, gets the compiled UNSET
-      # default -- which is "percolator" (retrain) upstream. The script rewrites only
-      # that unset default and tripwires the OSPREY_PICK_LEGACY default so we cannot
-      # silently ship legacy peak picking instead of the improved LDA pick. It fails
-      # loudly if the Osprey source moved. See scripts/patch_osprey_pass2_default.ps1.
-      # OSPREY_PASS2_QVALUE / OSPREY_PICK_LEGACY are deliberately left UNSET in this
-      # job: they are runtime vars, so the build env has no effect on the shipped exe.
-      - name: Default Osprey 2nd-pass q-value to protein-compact
+      # Repoint the Osprey defaults this installer ships. Osprey reads its OSPREY_* knobs
+      # from the environment at process start, so a shipped MSI -- run by collaborators who
+      # never set those vars -- gets the compiled UNSET defaults. Upstream (pwiz#4446)
+      # landed the new pass-2 modes and the learned peak pick OFF by default, since
+      # flipping either is a coordinated re-baseline of pwiz's regression golden. Carafe
+      # wants both on, so the script rewrites exactly two defaults:
+      #   * OSPREY_PASS2_QVALUE unset -> protein-compact (frozen 1st-pass weights +
+      #     protein-stratum competition, no retrain) instead of percolator (retrain);
+      #   * OSPREY_PICK_LDA         -> default ON (learned resolution-keyed pick) instead
+      #     of opt-in; before pwiz#4446 that pick WAS the default, so this keeps the MSI
+      #     continuous with every installer shipped so far.
+      # It also tripwires OSPREY_PROTEIN_COMPACT_RETRAIN (must stay opt-in) so the 2nd
+      # pass cannot silently start retraining, and fails loudly if the Osprey source
+      # moved. See scripts/patch_osprey_installer_defaults.ps1.
+      # These OSPREY_* vars are deliberately left UNSET in this job: they are runtime
+      # vars, so the build env has no effect on the shipped exe.
+      - name: Set Osprey installer defaults (protein-compact q-value, LDA pick)
         shell: pwsh
-        run: ./scripts/patch_osprey_pass2_default.ps1 -OspreyEnvPath pwiz/pwiz_tools/Osprey/Osprey.Core/OspreyEnvironment.cs
+        run: ./scripts/patch_osprey_installer_defaults.ps1 -OspreyEnvPath pwiz/pwiz_tools/Osprey/Osprey.Core/OspreyEnvironment.cs
 
       # Publish a self-contained Osprey straight into the app directory so
       # jpackage's --input sweeps it into the MSI. resolveOspreyBinary() then finds
