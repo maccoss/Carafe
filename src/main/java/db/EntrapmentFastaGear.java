@@ -294,14 +294,20 @@ public class EntrapmentFastaGear {
      *       the gate's effect and not the sampling noise of a fresh 1.39M-peptide draw.</li>
      * </ul>
      *
-     * <p><b>Reviewer note - reasonable to drop later.</b> A uniform "{@code :attempt}" for every
-     * attempt is simpler, and one less thing for a reimplementation to get subtly wrong: miss the
-     * special case and you silently produce a different library. The benefit above is
-     * transitional - it matters only while a pre-gate library is still the comparator - whereas
-     * the special case is permanent. Nothing else needs it, because a deliberately different
-     * entrapment draw is already available by changing {@code -entrapment_seed}. Once no pre-gate
-     * library is being compared against, this can collapse to a plain three-part derivation, at
-     * the cost of every entrapment sequence changing on the next rebuild.</p>
+     * <p><b>This is not merely legacy compatibility.</b> The first property is a permanent
+     * regression oracle: "does this generator still reproduce the delivered library exactly?"
+     * catches any future drift in digestion or generation, and it keeps working long after the
+     * migration that motivated it. Collapsing to a uniform "{@code :attempt}" would spend that
+     * oracle to remove a special case, and would also change every entrapment sequence in one
+     * step. Both derivations are equally deterministic - neither reads a clock, and the same
+     * inputs give the same output on every run and every machine - so uniformity would buy
+     * tidiness, not reproducibility. A deliberately different draw is already available by
+     * changing {@code -entrapment_seed}, which is the only thing that should ever move it.</p>
+     *
+     * <p><b>Reviewer note.</b> The one real cost is that a reimplementation must not miss the
+     * special case: doing so silently produces a different library rather than an error. If that
+     * ever bites, prefer making the legacy derivation explicit (a named constant, or a documented
+     * "attempt 0 is the compatibility seed" branch) over removing it.</p>
      */
     private static long derivePepSeed(long masterSeed, String seq, int attempt) {
         try {
