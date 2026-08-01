@@ -710,6 +710,8 @@ public class AIGear {
         // Peptide-level entrapment FASTA + FDRBench pairing manifest generation (for Osprey).
         options.addOption("build_entrapment_fasta", true, "Build a peptide-level FASTA from the -db protein FASTA (using the configured digest options) and write it to the given path. Run Carafe library generation over this FASTA with -enzyme NoCut so targets and decoys are both predicted.");
         options.addOption("manifest", true, "Output FDRBench 5-column pairing manifest TSV (used with -build_entrapment_fasta and Osprey's --decoy-pairing-manifest).");
+        options.addOption("entrapment_db", true, "Foreign-species protein FASTA to draw entrapment peptides from (e.g. an Arabidopsis proteome), instead of shuffling each target. Each target is paired 1:1 with a unique foreign peptide of matched neutral mass. Requires -entrapment.");
+        options.addOption("entrapment_ratio", true, "Fraction of targets that carry an entrapment peptide, in (0, 1]. Default 1.0 (every target). A smaller value makes entrapment a thin overlay that perturbs the target search less.");
         options.addOption("entrapment", false, "Include entrapment (p_target/p_decoy) peptides when building the entrapment FASTA. Default off (target+decoy only).");
         options.addOption("no_decoys", false, "Do not add decoy peptides when building the entrapment FASTA. Default is to add decoys.");
         options.addOption("mz_filter", false, "Apply the precursor m/z window filter (-min_pep_mz/-max_pep_mz at charges -min_pep_charge..-max_pep_charge) when building the entrapment FASTA.");
@@ -930,6 +932,20 @@ public class AIGear {
             }
             if (cmd.hasOption("decoy_seed")) {
                 efc.decoySeed = Long.parseLong(cmd.getOptionValue("decoy_seed"));
+            }
+            if (cmd.hasOption("entrapment_db")) {
+                efc.entrapmentSourceFasta = cmd.getOptionValue("entrapment_db");
+                if (!efc.addEntrapment) {
+                    System.err.println("-entrapment_db has no effect without -entrapment");
+                    System.exit(1);
+                }
+            }
+            if (cmd.hasOption("entrapment_ratio")) {
+                efc.entrapmentRatio = Double.parseDouble(cmd.getOptionValue("entrapment_ratio"));
+                if (efc.entrapmentRatio <= 0.0 || efc.entrapmentRatio > 1.0) {
+                    System.err.println("-entrapment_ratio must be in (0, 1]: " + efc.entrapmentRatio);
+                    System.exit(1);
+                }
             }
             EntrapmentFastaGear.run(efc);
             Cloger.getInstance().logger.info("Entrapment FASTA build finished in "

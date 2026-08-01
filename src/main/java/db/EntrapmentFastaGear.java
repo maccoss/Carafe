@@ -102,6 +102,20 @@ public class EntrapmentFastaGear {
         public int[] charges = {2, 3};
         public long entrapmentSeed = 42;
         public long decoySeed = 24;
+        /**
+         * Foreign-species protein FASTA to draw entrapment peptides from. When null (the default)
+         * entrapment is a deterministic shuffle of each target, which is what Carafe has always
+         * done. When set, entrapment peptides are real foreign peptides mass-matched 1:1 to the
+         * targets - see {@link ForeignEntrapmentSource} for why that measures FDP more honestly.
+         */
+        public String entrapmentSourceFasta = null;
+        /**
+         * Fraction of targets that carry an entrapment peptide, in (0, 1]. 1.0 pairs every target.
+         * A smaller value makes entrapment a thin overlay that barely perturbs the target search,
+         * which measures FDP without distorting it - the estimator is ratio-aware, so the reported
+         * FDP stays comparable.
+         */
+        public double entrapmentRatio = 1.0;
         public String entrapmentSuffix = DEFAULT_ENTRAPMENT_SUFFIX;
         public String decoyPrefix = DEFAULT_DECOY_PREFIX;
         public boolean uniqueAccessions = true;
@@ -129,6 +143,10 @@ public class EntrapmentFastaGear {
         String pTarget = null;
         String decoy = null;
         String pDecoy = null;
+        /** True when this target was chosen to carry entrapment (all of them unless ratio < 1).
+         *  Distinguishes "deliberately has none" from "none could be generated", which must be
+         *  dropped rather than silently emitted as a bare target+decoy pair. */
+        boolean entrapmentSelected = false;
         final List<ProteinRecord> sources = new ArrayList<>();
 
         Quartet(String target) {
@@ -150,6 +168,30 @@ public class EntrapmentFastaGear {
         public int decoyEntries;
         public int pDecoyEntries;
         public int sharedEntries;
+        /** Targets with no entrapment sequence that passes the similarity gate (quartet dropped). */
+        public int droppedNoEntrapment;
+        /** Targets with no decoy that passes the similarity gate (quartet dropped). */
+        public int droppedNoDecoy;
+        /** Entrapment peptides drawn from a foreign proteome rather than shuffled. */
+        public int entrapmentFromForeign;
+        /** Targets deliberately left without entrapment because {@code entrapmentRatio} < 1. */
+        public int entrapmentNotSelected;
+    }
+
+    /** Monoisotopic residue masses, for {@link DecoySimilarityGate}'s theoretical ladder. Shared
+     *  rather than duplicated so the two cannot drift apart. */
+    static Map<Character, Double> residueMasses() {
+        return AA_MONO_MASS;
+    }
+
+    /** Proton mass (Da), for {@link DecoySimilarityGate}. */
+    static double protonMass() {
+        return PROTON_MONO;
+    }
+
+    /** Water mass (Da), for {@link DecoySimilarityGate}. */
+    static double waterMass() {
+        return H2O_MONO;
     }
 
     /** Monoisotopic neutral mass of a peptide, or {@code null} if any residue is not in
@@ -184,6 +226,17 @@ public class EntrapmentFastaGear {
      * inputs are returned unchanged.
      */
     public static String shufflePreservingCterm(String seq, long masterSeed) {
+        return shufflePreservingCterm(seq, masterSeed, 0);
+    }
+
+    /**
+     * Attempt-indexed variant used by {@link #generateShuffledEntrapment}. Attempt 0 derives the
+     * seed exactly as the single-argument form always has, so a peptide whose first shuffle is
+     * already acceptable keeps the sequence it had before the similarity gate existed. Only
+     * peptides the gate actually rejects get a different entrapment, which keeps a rebuilt library
+     * a clean differential against the previous one instead of a wholesale re-randomization.
+     */
+    public static String shufflePreservingCterm(String seq, long masterSeed, int attempt) {
         if (seq.length() <= 2) {
             return seq;
         }
@@ -192,7 +245,7 @@ public class EntrapmentFastaGear {
         for (int i = 0; i < seq.length() - 1; i++) {
             body.add(seq.charAt(i));
         }
-        long pepSeed = derivePepSeed(masterSeed, seq);
+        long pepSeed = derivePepSeed(masterSeed, seq, attempt);
         Random rng = new Random(pepSeed);
         // Fisher-Yates so the shuffle is fully determined by the seed.
         for (int i = body.size() - 1; i > 0; i--) {
@@ -209,11 +262,18 @@ public class EntrapmentFastaGear {
         return sb.toString();
     }
 
-    /** First 8 bytes of SHA-1("{@code masterSeed:seq}") as an unsigned-ish long seed. */
-    private static long derivePepSeed(long masterSeed, String seq) {
+    /**
+     * First 8 bytes of SHA-1("{@code masterSeed:seq}") - or "{@code masterSeed:seq:attempt}" for
+     * retries - as an unsigned-ish long seed. Attempt 0 keeps the original two-part form so its
+     * output is unchanged from before the retry loop existed.
+     */
+    private static long derivePepSeed(long masterSeed, String seq, int attempt) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-1");
-            byte[] digest = md.digest((masterSeed + ":" + seq).getBytes(StandardCharsets.UTF_8));
+            String material = attempt == 0
+                    ? masterSeed + ":" + seq
+                    : masterSeed + ":" + seq + ":" + attempt;
+            byte[] digest = md.digest(material.getBytes(StandardCharsets.UTF_8));
             long s = 0L;
             for (int i = 0; i < 8; i++) {
                 s = (s << 8) | (digest[i] & 0xffL);
@@ -221,8 +281,43 @@ public class EntrapmentFastaGear {
             return s;
         } catch (NoSuchAlgorithmException e) {
             // SHA-1 is guaranteed present on every JVM; fall back to the string hash if not.
-            return ((long) seq.hashCode() << 16) ^ masterSeed;
+            // Mixing in the attempt keeps retries distinct on that path too.
+            return ((long) seq.hashCode() << 16) ^ masterSeed ^ ((long) attempt * 0x9E3779B97F4A7C15L);
         }
+    }
+
+    /**
+     * Maximum shuffles tried before a peptide is declared to have no acceptable entrapment.
+     *
+     * <p>Chosen so that a peptide with genuine permutational freedom effectively never exhausts
+     * it, while a peptide with none - {@code AAAAAAAAAAAAAAAAGATCLER}, 17 alanines, where every
+     * permutation is the same sequence - fails fast. Dropping that peptide is the correct answer:
+     * no permutation of 17 alanines is a valid entrapment.</p>
+     */
+    public static final int MAX_ENTRAPMENT_SHUFFLE_ATTEMPTS = 20;
+
+    /**
+     * Generate an entrapment peptide by shuffling the target, retrying until the result is
+     * distinct, collides with no real target, and passes {@link DecoySimilarityGate}. Returns
+     * {@code null} when no acceptable shuffle exists, so the caller drops the quartet.
+     *
+     * <p>Before this existed the shuffle was called ONCE with no retry, and the only rejection was
+     * an exact string collision with a real target. That let an entrapment land close enough to
+     * its own target to be detected wherever the target is - measured at ~27% of the ACCEPTED
+     * entrapment set on two datasets, of which roughly half shadowed a target that was itself
+     * accepted, co-eluting within 0.05 min. Those are not false peptides at all, but the FDP
+     * estimator counts them as such, inflating measured FDP by ~25%.</p>
+     */
+    public static String generateShuffledEntrapment(String seq, long masterSeed, Set<String> targetSet) {
+        for (int attempt = 0; attempt < MAX_ENTRAPMENT_SHUFFLE_ATTEMPTS; attempt++) {
+            String candidate = shufflePreservingCterm(seq, masterSeed, attempt);
+            if (!candidate.equals(seq)
+                    && !targetSet.contains(candidate)
+                    && DecoySimilarityGate.isCandidateAcceptable(seq, candidate)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /**
@@ -271,13 +366,15 @@ public class EntrapmentFastaGear {
      */
     public static String generateReverseDecoy(String seq, Set<String> targetSet) {
         String rev = reversePreservingCterm(seq);
-        if (!rev.equals(seq) && !targetSet.contains(rev)) {
+        if (!rev.equals(seq) && !targetSet.contains(rev)
+                && DecoySimilarityGate.isCandidateAcceptable(seq, rev)) {
             return rev;
         }
         int maxRetries = Math.min(seq.length(), 10);
         for (int c = 1; c <= maxRetries; c++) {
             String cyc = cyclePreservingCterm(seq, c);
-            if (!cyc.equals(seq) && !targetSet.contains(cyc)) {
+            if (!cyc.equals(seq) && !targetSet.contains(cyc)
+                    && DecoySimilarityGate.isCandidateAcceptable(seq, cyc)) {
                 return cyc;
             }
         }
@@ -382,10 +479,10 @@ public class EntrapmentFastaGear {
         for (Map.Entry<String, List<ProteinRecord>> e : targetToSources.entrySet()) {
             Quartet q = new Quartet(e.getKey());
             q.sources.addAll(e.getValue());
-            if (cfg.addEntrapment) {
-                q.pTarget = shufflePreservingCterm(q.target, cfg.entrapmentSeed);
-            }
             quartets.add(q);
+        }
+        if (cfg.addEntrapment) {
+            assignEntrapment(cfg, quartets, targetSet, enzyme, dbGear, r);
         }
         // Decoys stay unique against every real target PLUS every entrapment.
         Set<String> targetSideSet = new HashSet<>(targetSet);
@@ -406,13 +503,19 @@ public class EntrapmentFastaGear {
         }
         r.quartetsBuilt = quartets.size();
 
-        // Step 3: drop a quartet when its entrapment shuffle collides with a real target, or when a
-        // requested reverse decoy could not be made unique (generateReverseDecoy returned null).
+        // Step 3: drop a quartet when no acceptable entrapment could be generated for a target that
+        // was selected to carry one, when its entrapment collides with a real target (belt and
+        // braces - both generators already reject that), or when a requested decoy could not be
+        // produced. A target that was deliberately left without entrapment (ratio < 1) is kept.
         List<Quartet> kept = new ArrayList<>(quartets.size());
         for (Quartet q : quartets) {
-            boolean drop = (q.pTarget != null && targetSet.contains(q.pTarget))
+            boolean drop = (q.entrapmentSelected && q.pTarget == null)
+                    || (q.pTarget != null && targetSet.contains(q.pTarget))
                     || (cfg.addDecoys && q.decoy == null)
                     || (cfg.addDecoys && cfg.addEntrapment && q.pTarget != null && q.pDecoy == null);
+            if (drop && cfg.addDecoys && q.decoy == null) {
+                r.droppedNoDecoy++;
+            }
             if (!drop) {
                 kept.add(q);
             }
@@ -425,6 +528,12 @@ public class EntrapmentFastaGear {
         Cloger.getInstance().logger.info(String.format(
                 "Collision-drop pass: %d peptide groups dropped, %d retained (each group = %s)",
                 r.quartetsDropped, r.keptQuartets, composition));
+        if (cfg.addEntrapment || cfg.addDecoys) {
+            Cloger.getInstance().logger.info(String.format(
+                    "Similarity gate (max fragment overlap %.2f): %d dropped with no acceptable "
+                            + "entrapment, %d with no acceptable decoy",
+                    DecoySimilarityGate.MAX_FRAGMENT_OVERLAP, r.droppedNoEntrapment, r.droppedNoDecoy));
+        }
 
         // Stable ordering: sort by target sequence so the manifest pair_index is reproducible,
         // and sort each quartet's sources so the primary (header) accession is deterministic.
@@ -444,6 +553,85 @@ public class EntrapmentFastaGear {
             writeManifest(cfg, kept);
         }
         return r;
+    }
+
+    /**
+     * Populate {@code pTarget} on every quartet selected to carry entrapment, either by shuffling
+     * the target (default) or by drawing a mass-matched foreign peptide when
+     * {@link Config#entrapmentSourceFasta} is set.
+     *
+     * <p>Quartets are processed in sequence-sorted order so the assignment does not depend on the
+     * order proteins happened to appear in the input FASTA. That matters for the foreign source,
+     * where each draw consumes a peptide and therefore changes what later targets can get.</p>
+     */
+    private static void assignEntrapment(Config cfg, List<Quartet> quartets, Set<String> targetSet,
+                                         Enzyme enzyme, DBGear dbGear, Result r) throws IOException {
+        if (cfg.entrapmentRatio <= 0.0 || cfg.entrapmentRatio > 1.0) {
+            throw new IllegalArgumentException(
+                    "entrapment ratio must be in (0, 1]: " + cfg.entrapmentRatio);
+        }
+        List<Quartet> ordered = new ArrayList<>(quartets);
+        ordered.sort((a, b) -> a.target.compareTo(b.target));
+
+        List<Quartet> selected;
+        int nSelected = (int) Math.round(cfg.entrapmentRatio * ordered.size());
+        if (nSelected >= ordered.size()) {
+            selected = ordered;
+        } else {
+            // Seeded selection so two machines building at the same ratio pick the same subset.
+            List<Quartet> shuffled = new ArrayList<>(ordered);
+            Random rng = new Random(cfg.entrapmentSeed);
+            for (int i = shuffled.size() - 1; i > 0; i--) {
+                int j = rng.nextInt(i + 1);
+                Quartet tmp = shuffled.get(i);
+                shuffled.set(i, shuffled.get(j));
+                shuffled.set(j, tmp);
+            }
+            selected = new ArrayList<>(shuffled.subList(0, nSelected));
+            selected.sort((a, b) -> a.target.compareTo(b.target));
+        }
+        r.entrapmentNotSelected = ordered.size() - selected.size();
+        for (Quartet q : selected) {
+            q.entrapmentSelected = true;
+        }
+
+        if (cfg.entrapmentSourceFasta == null) {
+            for (Quartet q : selected) {
+                q.pTarget = generateShuffledEntrapment(q.target, cfg.entrapmentSeed, targetSet);
+                if (q.pTarget == null) {
+                    r.droppedNoEntrapment++;
+                }
+            }
+            return;
+        }
+
+        Cloger.getInstance().logger.info(
+                "Drawing entrapment from foreign proteome: " + cfg.entrapmentSourceFasta);
+        ForeignEntrapmentSource pool = ForeignEntrapmentSource.build(
+                cfg.entrapmentSourceFasta, enzyme, dbGear, targetSet,
+                cfg.applyMzFilter, cfg.charges, cfg.minMz, cfg.maxMz);
+        if (pool.available() < selected.size()) {
+            // Not fatal - the shortfall shows up as dropped quartets and a lower achieved ratio -
+            // but it silently changes what was asked for, so say so before it happens.
+            Cloger.getInstance().logger.warn(String.format(
+                    "Foreign entrapment pool has %d peptides for %d selected targets; the achieved "
+                            + "ratio will be below the requested %.3f",
+                    pool.available(), selected.size(), cfg.entrapmentRatio));
+        }
+        for (Quartet q : selected) {
+            Double mass = peptideNeutralMass(q.target);
+            String foreign = mass == null ? null : pool.draw(q.target, mass);
+            if (foreign == null) {
+                r.droppedNoEntrapment++;
+                continue;
+            }
+            q.pTarget = foreign;
+            r.entrapmentFromForeign++;
+        }
+        Cloger.getInstance().logger.info(String.format(
+                "Foreign entrapment assigned to %d of %d selected targets (%d unmatched); "
+                        + "%d peptides left unused in the pool",
+                r.entrapmentFromForeign, selected.size(), r.droppedNoEntrapment, pool.available()));
     }
 
     private static void writeFasta(Config cfg, List<Quartet> kept, Result r) throws IOException {
