@@ -244,11 +244,10 @@ public class EntrapmentFastaGear {
     }
 
     /**
-     * Attempt-indexed variant used by {@link #generateShuffledEntrapment}. Attempt 0 derives the
-     * seed exactly as the single-argument form always has, so a peptide whose first shuffle is
-     * already acceptable keeps the sequence it had before the similarity gate existed. Only
-     * peptides the gate actually rejects get a different entrapment, which keeps a rebuilt library
-     * a clean differential against the previous one instead of a wholesale re-randomization.
+     * Attempt-indexed variant used by {@link #generateShuffledEntrapment}. Attempt 0 reproduces
+     * the single-argument form exactly, so only peptides the gate actually rejects get a different
+     * entrapment; see {@link #derivePepSeed} for why that is deliberate and when it could be
+     * dropped.
      */
     public static String shufflePreservingCterm(String seq, long masterSeed, int attempt) {
         if (seq.length() <= 2) {
@@ -278,8 +277,31 @@ public class EntrapmentFastaGear {
 
     /**
      * First 8 bytes of SHA-1("{@code masterSeed:seq}") - or "{@code masterSeed:seq:attempt}" for
-     * retries - as an unsigned-ish long seed. Attempt 0 keeps the original two-part form so its
-     * output is unchanged from before the retry loop existed.
+     * retries - as an unsigned-ish long seed.
+     *
+     * <p><b>Attempt 0 deliberately keeps the original two-part form</b> rather than uniformly
+     * appending "{@code :0}", so a peptide whose first shuffle already passes the gate keeps the
+     * exact entrapment sequence it had before the gate existed. Two things depend on that:</p>
+     * <ul>
+     *   <li>{@code -no_similarity_gate} reproduces a pre-gate library <b>byte for byte</b>. With
+     *       the gate off the loop runs exactly one attempt, so attempt 0's derivation IS the
+     *       reproduction. That is what proves a rebuild differs from a delivered library only by
+     *       the gate, rather than by some unnoticed change in digest parameters - verified on
+     *       Astral as an identical SHA-256 over the 349 MB peptide FASTA and all 1,390,979
+     *       manifest quartets.</li>
+     *   <li>Comparing measured FDP before and after the gate is then almost a PAIRED comparison:
+     *       only the ~4% of entrapment the gate actually rejects changes, so the difference is
+     *       the gate's effect and not the sampling noise of a fresh 1.39M-peptide draw.</li>
+     * </ul>
+     *
+     * <p><b>Reviewer note - reasonable to drop later.</b> A uniform "{@code :attempt}" for every
+     * attempt is simpler, and one less thing for a reimplementation to get subtly wrong: miss the
+     * special case and you silently produce a different library. The benefit above is
+     * transitional - it matters only while a pre-gate library is still the comparator - whereas
+     * the special case is permanent. Nothing else needs it, because a deliberately different
+     * entrapment draw is already available by changing {@code -entrapment_seed}. Once no pre-gate
+     * library is being compared against, this can collapse to a plain three-part derivation, at
+     * the cost of every entrapment sequence changing on the next rebuild.</p>
      */
     private static long derivePepSeed(long masterSeed, String seq, int attempt) {
         try {

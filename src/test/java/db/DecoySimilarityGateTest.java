@@ -148,8 +148,12 @@ public class DecoySimilarityGateTest {
 
     @Test
     public void testAttemptZeroKeepsTheOriginalSeedDerivation() {
-        // Deliberate: only peptides the gate actually rejects get a new entrapment, so a rebuilt
-        // library is a clean differential against the previous one.
+        // Deliberate, and two things depend on it: -no_similarity_gate reproduces a pre-gate
+        // library byte for byte (it runs exactly one attempt, so attempt 0's derivation IS the
+        // reproduction), and a before/after FDP comparison stays nearly paired because only the
+        // ~4% of entrapment the gate rejects changes. See EntrapmentFastaGear.derivePepSeed for
+        // the full rationale and the case for dropping it later - if this assertion is changed on
+        // purpose, both of those properties go with it.
         String withoutAttempt = EntrapmentFastaGear.shufflePreservingCterm("SAMPLERPEPTIDEK", 42L);
         String attemptZero = EntrapmentFastaGear.shufflePreservingCterm("SAMPLERPEPTIDEK", 42L, 0);
         Assert.assertEquals(attemptZero, withoutAttempt,
