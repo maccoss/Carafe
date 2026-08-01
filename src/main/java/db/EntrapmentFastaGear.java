@@ -116,6 +116,16 @@ public class EntrapmentFastaGear {
          * FDP stays comparable.
          */
         public double entrapmentRatio = 1.0;
+        /**
+         * Apply {@link DecoySimilarityGate} to generated entrapment and decoy sequences.
+         *
+         * <p>An AUDIT SWITCH, not a tuning knob. Turning it off reproduces the pre-gate behaviour
+         * (one shuffle, exact-collision rejection only), which is how a rebuilt library is proved
+         * to differ from an older one ONLY by the gate rather than by some unnoticed change in
+         * digest parameters. A library built with this off has the near-copy contamination the
+         * gate exists to remove and should not be searched.</p>
+         */
+        public boolean similarityGate = true;
         public String entrapmentSuffix = DEFAULT_ENTRAPMENT_SUFFIX;
         public String decoyPrefix = DEFAULT_DECOY_PREFIX;
         public boolean uniqueAccessions = true;
@@ -176,6 +186,10 @@ public class EntrapmentFastaGear {
         public int entrapmentFromForeign;
         /** Targets deliberately left without entrapment because {@code entrapmentRatio} < 1. */
         public int entrapmentNotSelected;
+        /** Median |target - entrapment| neutral mass (Da) for a foreign-source assignment. */
+        public double entrapmentMedianAbsMassDelta;
+        /** Fraction of foreign entrapment peptides co-locating with their target's window. */
+        public double entrapmentInIsolationWindowFraction;
     }
 
     /** Monoisotopic residue masses, for {@link DecoySimilarityGate}'s theoretical ladder. Shared
@@ -309,11 +323,22 @@ public class EntrapmentFastaGear {
      * estimator counts them as such, inflating measured FDP by ~25%.</p>
      */
     public static String generateShuffledEntrapment(String seq, long masterSeed, Set<String> targetSet) {
-        for (int attempt = 0; attempt < MAX_ENTRAPMENT_SHUFFLE_ATTEMPTS; attempt++) {
+        return generateShuffledEntrapment(seq, masterSeed, targetSet, true);
+    }
+
+    /**
+     * As {@link #generateShuffledEntrapment(String, long, Set)}, with {@code gate} false
+     * reproducing the pre-gate behaviour: a single shuffle rejected only on an exact collision.
+     * For audit builds only - see {@link Config#similarityGate}.
+     */
+    public static String generateShuffledEntrapment(String seq, long masterSeed,
+                                                    Set<String> targetSet, boolean gate) {
+        int attempts = gate ? MAX_ENTRAPMENT_SHUFFLE_ATTEMPTS : 1;
+        for (int attempt = 0; attempt < attempts; attempt++) {
             String candidate = shufflePreservingCterm(seq, masterSeed, attempt);
             if (!candidate.equals(seq)
                     && !targetSet.contains(candidate)
-                    && DecoySimilarityGate.isCandidateAcceptable(seq, candidate)) {
+                    && (!gate || DecoySimilarityGate.isCandidateAcceptable(seq, candidate))) {
                 return candidate;
             }
         }
@@ -365,16 +390,25 @@ public class EntrapmentFastaGear {
      * produced (the caller drops that target-decoy pair, as Osprey does).
      */
     public static String generateReverseDecoy(String seq, Set<String> targetSet) {
+        return generateReverseDecoy(seq, targetSet, true);
+    }
+
+    /**
+     * As {@link #generateReverseDecoy(String, Set)}, with {@code gate} false reproducing the
+     * pre-gate behaviour (exact-uniqueness rejection only). For audit builds only - see
+     * {@link Config#similarityGate}.
+     */
+    public static String generateReverseDecoy(String seq, Set<String> targetSet, boolean gate) {
         String rev = reversePreservingCterm(seq);
         if (!rev.equals(seq) && !targetSet.contains(rev)
-                && DecoySimilarityGate.isCandidateAcceptable(seq, rev)) {
+                && (!gate || DecoySimilarityGate.isCandidateAcceptable(seq, rev))) {
             return rev;
         }
         int maxRetries = Math.min(seq.length(), 10);
         for (int c = 1; c <= maxRetries; c++) {
             String cyc = cyclePreservingCterm(seq, c);
             if (!cyc.equals(seq) && !targetSet.contains(cyc)
-                    && DecoySimilarityGate.isCandidateAcceptable(seq, cyc)) {
+                    && (!gate || DecoySimilarityGate.isCandidateAcceptable(seq, cyc))) {
                 return cyc;
             }
         }
@@ -495,9 +529,9 @@ public class EntrapmentFastaGear {
         }
         if (cfg.addDecoys) {
             for (Quartet q : quartets) {
-                q.decoy = generateReverseDecoy(q.target, targetSideSet);
+                q.decoy = generateReverseDecoy(q.target, targetSideSet, cfg.similarityGate);
                 if (cfg.addEntrapment && q.pTarget != null) {
-                    q.pDecoy = generateReverseDecoy(q.pTarget, targetSideSet);
+                    q.pDecoy = generateReverseDecoy(q.pTarget, targetSideSet, cfg.similarityGate);
                 }
             }
         }
@@ -597,7 +631,8 @@ public class EntrapmentFastaGear {
 
         if (cfg.entrapmentSourceFasta == null) {
             for (Quartet q : selected) {
-                q.pTarget = generateShuffledEntrapment(q.target, cfg.entrapmentSeed, targetSet);
+                q.pTarget = generateShuffledEntrapment(
+                        q.target, cfg.entrapmentSeed, targetSet, cfg.similarityGate);
                 if (q.pTarget == null) {
                     r.droppedNoEntrapment++;
                 }
@@ -618,20 +653,56 @@ public class EntrapmentFastaGear {
                             + "ratio will be below the requested %.3f",
                     pool.available(), selected.size(), cfg.entrapmentRatio));
         }
-        for (Quartet q : selected) {
-            Double mass = peptideNeutralMass(q.target);
-            String foreign = mass == null ? null : pool.draw(q.target, mass);
+        // Assignment order is deliberately UNCORRELATED with mass (sequence order). Sweeping in
+        // mass order lets each target consume supply just above it, so a deficit accumulates and
+        // later targets are dragged progressively further off their own mass.
+        List<Quartet> drawOrder = new ArrayList<>(selected);
+        drawOrder.removeIf(q -> peptideNeutralMass(q.target) == null);
+        r.droppedNoEntrapment += selected.size() - drawOrder.size();
+
+        double[] massDeltas = new double[drawOrder.size()];
+        int nDeltas = 0;
+        for (Quartet q : drawOrder) {
+            double mass = peptideNeutralMass(q.target);
+            String foreign = pool.assign(q.target, mass);
             if (foreign == null) {
                 r.droppedNoEntrapment++;
                 continue;
             }
             q.pTarget = foreign;
             r.entrapmentFromForeign++;
+            Double foreignMass = peptideNeutralMass(foreign);
+            if (foreignMass != null) {
+                massDeltas[nDeltas++] = Math.abs(mass - foreignMass);
+            }
         }
         Cloger.getInstance().logger.info(String.format(
                 "Foreign entrapment assigned to %d of %d selected targets (%d unmatched); "
                         + "%d peptides left unused in the pool",
                 r.entrapmentFromForeign, selected.size(), r.droppedNoEntrapment, pool.available()));
+
+        // Match quality is what makes this a CONTROLLED comparison rather than just a swap: an
+        // entrapment peptide only samples the same difficulty as its target if it co-locates in
+        // the same isolation window. Report it rather than leaving it to be discovered later.
+        if (nDeltas > 0) {
+            double[] sorted = java.util.Arrays.copyOf(massDeltas, nDeltas);
+            java.util.Arrays.sort(sorted);
+            int inWindow = 0;
+            for (int i = 0; i < nDeltas; i++) {
+                // Narrowest common DIA isolation width, at the lowest charge considered.
+                if (massDeltas[i] / 2.0 < 3.0) {
+                    inWindow++;
+                }
+            }
+            r.entrapmentMedianAbsMassDelta = sorted[nDeltas / 2];
+            r.entrapmentInIsolationWindowFraction = (double) inWindow / nDeltas;
+            Cloger.getInstance().logger.info(String.format(
+                    "Foreign entrapment mass match: median |dm| %.4f Da, 90th %.4f, 99th %.4f, "
+                            + "max %.2f; %.2f%% within a 3 m/z isolation window at charge 2",
+                    sorted[nDeltas / 2], sorted[(int) (0.90 * (nDeltas - 1))],
+                    sorted[(int) (0.99 * (nDeltas - 1))], sorted[nDeltas - 1],
+                    100.0 * r.entrapmentInIsolationWindowFraction));
+        }
     }
 
     private static void writeFasta(Config cfg, List<Quartet> kept, Result r) throws IOException {

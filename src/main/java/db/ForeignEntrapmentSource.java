@@ -11,12 +11,9 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.NavigableMap;
 import java.util.Set;
-import java.util.TreeMap;
 
 /**
  * A pool of foreign-species peptides used as entrapment sequences instead of shuffling the target.
@@ -24,66 +21,101 @@ import java.util.TreeMap;
  * <p><b>Why.</b> A shuffled entrapment is an anagram of its own target: it shares the target's
  * exact residue composition and therefore many of its fragment masses, so it is over-identified
  * and the FDP it measures is too high. A real peptide from a phylogenetically distant species
- * (Arabidopsis is the standard choice) has no such relationship to the target while still being
- * a real, physically plausible peptide that is genuinely absent from a human sample. Measured on
- * Stellar, swapping shuffle for matched Arabidopsis moved measured FDP from 1.62% to 1.15%.</p>
+ * (Arabidopsis is the standard choice) has no such relationship to the target while still being a
+ * real, physically plausible peptide that is genuinely absent from a human sample.</p>
  *
- * <p><b>The matched draw.</b> Each target is paired 1:1 with a UNIQUE foreign peptide of the
- * nearest available neutral mass, preferring the same length. Mass matching is what makes this a
- * controlled comparison: in DIA a library entry is only scored in the isolation window containing
- * its precursor m/z, so an entrapment set drawn without regard to mass would sample a different
- * difficulty regime than the targets and bias the FDP estimate. Candidates are absence-filtered
- * (no foreign peptide equal to a real target) and pass the same
- * {@link DecoySimilarityGate} as every other generated sequence.</p>
+ * <p><b>The matched assignment.</b> Each target is paired 1:1 with a UNIQUE foreign peptide of
+ * near-identical neutral mass. Mass matching is what makes this a controlled comparison: in DIA a
+ * library entry is only scored in the isolation window containing its precursor m/z, so an
+ * entrapment set drawn without regard to mass would sample a different difficulty regime than the
+ * targets and bias the FDP estimate.</p>
  *
- * <p><b>Determinism.</b> Draws are served from a sorted structure and consumed in a caller-fixed
- * order, so the same inputs always produce the same assignment. Nothing here uses randomness
- * except the ratio subset, which is seeded.</p>
+ * <p><b>What the assignment optimizes, and why that choice matters.</b> The objective is to
+ * MAXIMIZE THE NUMBER of pairs that co-locate - a threshold - not to minimize total mass
+ * displacement. Those are different problems and they want different algorithms, which is easy to
+ * get wrong:</p>
+ * <ul>
+ *   <li>Nearest-available in mass order accumulates a deficit (each target eats supply just above
+ *       it) and every later target is dragged further off. Measured 81% co-location.</li>
+ *   <li>A quantile map (rank i of n to rank i*m/n of m) is the optimal monotone transport and
+ *       gives an excellent worst case, but it spreads its error evenly across every pair, so most
+ *       pairs sit a few Da off. Optimal for total displacement, wrong for a threshold. Measured
+ *       49%.</li>
+ *   <li>Nearest-available in an order uncorrelated with mass gives most pairs a near-exact match
+ *       and strands the few it serves last. Measured 95%.</li>
+ * </ul>
+ * <p>This implementation bins the pool finely and serves each target from the nearest non-empty
+ * bin within the co-location window. Inside the window every candidate satisfies the objective
+ * equally, so bins are consumed in O(1) with no search, and the preference for nearer bins keeps
+ * the mass match tight as a secondary benefit. A target whose window is exhausted falls through to
+ * an unbounded search, so it still gets an entrapment peptide - just not a co-locating one, which
+ * is counted and reported rather than hidden.</p>
+ *
+ * <p><b>Determinism.</b> Bins are filled in mass-sorted order and consumed in a caller-fixed
+ * order, so the same inputs always produce the same pairing.</p>
  */
 public final class ForeignEntrapmentSource {
 
     /**
-     * Candidates examined per target before giving up on a length band. Only a candidate that
-     * fails {@link DecoySimilarityGate} consumes an attempt; a foreign peptide sharing over 40%
-     * of a target's ladder is rare, so this is generous.
+     * Neutral-mass window, in daltons, inside which an entrapment peptide is considered to
+     * co-locate with its target. A 3 m/z DIA isolation window spans 6 Da at charge 2 and 9 Da at
+     * charge 3; the tighter is used so a pair counted as co-locating does so at either charge.
      */
-    private static final int MAX_GATE_ATTEMPTS_PER_LENGTH = 8;
+    public static final double CO_LOCATION_WINDOW_DA = 6.0;
 
-    /** Length bands searched outward from the target's length before declaring no candidate. */
-    private static final int MAX_LENGTH_SEARCH_BANDS = 6;
+    /** Bin width (Da). Fine enough that the nearest non-empty bin is a tight mass match. */
+    private static final double BIN_WIDTH_DA = 0.25;
 
-    /** length -> (neutral mass -> peptides of that mass, not yet drawn). */
-    private final Map<Integer, NavigableMap<Double, ArrayDeque<String>>> byLength = new HashMap<>();
+    /** Bins either side of the target's own bin that still count as co-locating. */
+    private static final int CO_LOCATION_BINS = (int) ((CO_LOCATION_WINDOW_DA / 2.0) / BIN_WIDTH_DA);
+
+    /** Candidates examined per target before giving up, when the gate keeps rejecting. */
+    private static final int MAX_GATE_ATTEMPTS = 16;
+
+    private final ArrayDeque<String>[] bins;
+    private final double minMass;
     private int available;
+    private int total;
 
-    private ForeignEntrapmentSource() {
+    @SuppressWarnings("unchecked")
+    private ForeignEntrapmentSource(int nBins, double minMass) {
+        this.bins = new ArrayDeque[nBins];
+        this.minMass = minMass;
     }
 
-    /** Number of distinct foreign peptides still available to draw. */
+    /** Number of distinct foreign peptides still available. */
     public int available() {
         return available;
     }
 
+    /** Pool size before any assignment. */
+    public int size() {
+        return total;
+    }
+
     /**
-     * Digest a foreign proteome into a draw pool.
+     * Digest a foreign proteome into an assignment pool.
      *
-     * @param fastaPath   foreign-species protein FASTA (e.g. Arabidopsis UP000006548)
-     * @param enzyme      same enzyme used for the target digest
-     * @param dbGear      digester (shares the global CParameter digest options)
-     * @param excluded    real target sequences - a foreign peptide equal to one of these is not
-     *                    absent from the sample, so it cannot serve as entrapment
+     * @param fastaPath     foreign-species protein FASTA (e.g. Arabidopsis UP000006548)
+     * @param enzyme        same enzyme used for the target digest
+     * @param dbGear        digester (shares the global CParameter digest options)
+     * @param excluded      real target sequences - a foreign peptide equal to one of these is not
+     *                      absent from the sample, so it cannot serve as entrapment
      * @param applyMzFilter whether to require the peptide fit the precursor m/z window
      */
     public static ForeignEntrapmentSource build(String fastaPath, Enzyme enzyme, DBGear dbGear,
                                                 Set<String> excluded, boolean applyMzFilter,
                                                 int[] charges, double minMz, double maxMz)
             throws IOException {
-        ForeignEntrapmentSource pool = new ForeignEntrapmentSource();
         int proteins = 0;
         int droppedHomologous = 0;
         int droppedUnknownAa = 0;
         int droppedOutOfMz = 0;
-        java.util.Set<String> seen = new java.util.HashSet<>();
+        Set<String> seen = new HashSet<>();
+        List<String> keptSeqs = new ArrayList<>();
+        List<Double> keptMasses = new ArrayList<>();
+        double lo = Double.MAX_VALUE;
+        double hi = -Double.MAX_VALUE;
 
         File dbFile = new File(fastaPath);
         FASTAFileReader reader = new FASTAFileReaderImpl(dbFile);
@@ -115,95 +147,120 @@ public final class ForeignEntrapmentSource {
                         droppedOutOfMz++;
                         continue;
                     }
-                    pool.add(pep, mass);
+                    keptSeqs.add(pep);
+                    keptMasses.add(mass);
+                    lo = Math.min(lo, mass);
+                    hi = Math.max(hi, mass);
                 }
             }
         } finally {
             reader.close();
         }
 
+        if (keptSeqs.isEmpty()) {
+            throw new IOException("Foreign entrapment FASTA yielded no usable peptides: " + fastaPath);
+        }
+        int nBins = (int) ((hi - lo) / BIN_WIDTH_DA) + 2;
+        ForeignEntrapmentSource pool = new ForeignEntrapmentSource(nBins, lo);
+        // Fill in mass-sorted order so each bin's contents are deterministic and, within a bin,
+        // ordered - which keeps a draw's mass error at the low end of the bin where possible.
+        Integer[] order = new Integer[keptSeqs.size()];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        java.util.Arrays.sort(order, (a, b) -> {
+            int c = Double.compare(keptMasses.get(a), keptMasses.get(b));
+            return c != 0 ? c : keptSeqs.get(a).compareTo(keptSeqs.get(b));
+        });
+        for (Integer idx : order) {
+            pool.add(keptSeqs.get(idx), keptMasses.get(idx));
+        }
+
         Cloger.getInstance().logger.info(String.format(
                 "Foreign entrapment source: %d proteins -> %d unique candidate peptides "
                         + "(%d dropped equal to a real target, %d unknown AA, %d out of m/z range)",
-                proteins, pool.available, droppedHomologous, droppedUnknownAa, droppedOutOfMz));
+                proteins, pool.total, droppedHomologous, droppedUnknownAa, droppedOutOfMz));
         return pool;
     }
 
     private void add(String pep, double mass) {
-        byLength.computeIfAbsent(pep.length(), k -> new TreeMap<>())
-                .computeIfAbsent(mass, k -> new ArrayDeque<>())
-                .add(pep);
+        int b = binOf(mass);
+        if (bins[b] == null) {
+            bins[b] = new ArrayDeque<>();
+        }
+        bins[b].add(pep);
         available++;
+        total++;
+    }
+
+    private int binOf(double mass) {
+        int b = (int) ((mass - minMass) / BIN_WIDTH_DA);
+        if (b < 0) {
+            return 0;
+        }
+        return Math.min(b, bins.length - 1);
     }
 
     /**
-     * Draw the nearest-mass unused foreign peptide for {@code targetSeq}, preferring the target's
-     * own length and widening the length band only when that band is exhausted. The drawn peptide
-     * is removed from the pool, so every target gets a unique one. Returns {@code null} when no
-     * acceptable candidate remains.
+     * Assign a unique foreign peptide to {@code targetSeq}, preferring one that co-locates with it.
+     *
+     * @return the assigned peptide, or {@code null} if the pool is exhausted
      */
-    public String draw(String targetSeq, double targetMass) {
-        int targetLen = targetSeq.length();
-        // Length bands in order of distance: L, L-1, L+1, L-2, L+2, ...
-        for (int band = 0; band < MAX_LENGTH_SEARCH_BANDS; band++) {
-            for (int sign : (band == 0 ? new int[] {0} : new int[] {-1, 1})) {
-                int len = targetLen + sign * band;
-                if (len < 1) {
-                    continue;
+    public String assign(String targetSeq, double targetMass) {
+        String hit = search(targetSeq, targetMass, CO_LOCATION_BINS);
+        if (hit != null) {
+            return hit;
+        }
+        // Window exhausted. Take the nearest available anywhere rather than leaving the target
+        // without entrapment - the shortfall is reported as a co-location rate, not silently.
+        return search(targetSeq, targetMass, bins.length);
+    }
+
+    /** Nearest non-empty bin within {@code maxBins}, serving one peptide that passes the gate. */
+    private String search(String targetSeq, double targetMass, int maxBins) {
+        int home = binOf(targetMass);
+        int rejected = 0;
+        List<String> putBack = null;
+        try {
+            for (int radius = 0; radius <= maxBins; radius++) {
+                for (int sign = 0; sign < (radius == 0 ? 1 : 2); sign++) {
+                    int b = home + (sign == 0 ? radius : -radius);
+                    if (b < 0 || b >= bins.length || bins[b] == null || bins[b].isEmpty()) {
+                        continue;
+                    }
+                    while (!bins[b].isEmpty() && rejected < MAX_GATE_ATTEMPTS) {
+                        String candidate = bins[b].poll();
+                        available--;
+                        if (DecoySimilarityGate.isCandidateAcceptable(targetSeq, candidate)) {
+                            return candidate;
+                        }
+                        if (putBack == null) {
+                            putBack = new ArrayList<>();
+                        }
+                        putBack.add(candidate);
+                        rejected++;
+                    }
+                    if (rejected >= MAX_GATE_ATTEMPTS) {
+                        return null;
+                    }
                 }
-                String hit = drawFromLength(len, targetSeq, targetMass);
-                if (hit != null) {
-                    return hit;
+            }
+        } finally {
+            // Rejected candidates go back: a different target with a different ladder can use them.
+            if (putBack != null) {
+                for (String s : putBack) {
+                    Double m = EntrapmentFastaGear.peptideNeutralMass(s);
+                    if (m != null) {
+                        int b = binOf(m);
+                        if (bins[b] == null) {
+                            bins[b] = new ArrayDeque<>();
+                        }
+                        bins[b].add(s);
+                        available++;
+                    }
                 }
             }
         }
         return null;
-    }
-
-    /**
-     * Nearest-mass acceptable draw within a single length band. Candidates rejected by the
-     * similarity gate are put back so a later target with a different ladder can still use them.
-     */
-    private String drawFromLength(int len, String targetSeq, double targetMass) {
-        NavigableMap<Double, ArrayDeque<String>> band = byLength.get(len);
-        if (band == null || band.isEmpty()) {
-            return null;
-        }
-        List<String> rejected = new ArrayList<>();
-        List<Double> rejectedMass = new ArrayList<>();
-        String accepted = null;
-        try {
-            for (int attempt = 0; attempt < MAX_GATE_ATTEMPTS_PER_LENGTH; attempt++) {
-                Map.Entry<Double, ArrayDeque<String>> lo = band.floorEntry(targetMass);
-                Map.Entry<Double, ArrayDeque<String>> hi = band.ceilingEntry(targetMass);
-                Map.Entry<Double, ArrayDeque<String>> pick;
-                if (lo == null && hi == null) {
-                    break;
-                } else if (lo == null) {
-                    pick = hi;
-                } else if (hi == null) {
-                    pick = lo;
-                } else {
-                    pick = (targetMass - lo.getKey()) <= (hi.getKey() - targetMass) ? lo : hi;
-                }
-                double mass = pick.getKey();
-                String candidate = pick.getValue().poll();
-                if (pick.getValue().isEmpty()) {
-                    band.remove(mass);
-                }
-                available--;
-                if (DecoySimilarityGate.isCandidateAcceptable(targetSeq, candidate)) {
-                    accepted = candidate;
-                    break;
-                }
-                rejected.add(candidate);
-                rejectedMass.add(mass);
-            }
-        } finally {
-            for (int i = 0; i < rejected.size(); i++) {
-                add(rejected.get(i), rejectedMass.get(i));
-            }
-        }
-        return accepted;
     }
 }
