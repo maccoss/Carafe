@@ -112,6 +112,22 @@ public class CarafeGUI extends JFrame {
     // entrapment-FDR validation. Off => Carafe builds a target+decoy library for Osprey.
     private JCheckBox includeEntrapmentCheckbox = new JCheckBox("Include entrapment peptides (Osprey)", false);
 
+    // Entrapment source and ratio. These rows are HIDDEN until entrapment is enabled, and the
+    // FASTA row until a FASTA source is chosen, so the panel is unchanged for anyone not using
+    // entrapment. Their labels are held as fields because visibility is toggled per row.
+    private static final String ENTRAPMENT_SOURCE_SHUFFLE = "Shuffle target sequence";
+    private static final String ENTRAPMENT_SOURCE_FASTA = "Peptides from FASTA...";
+    private JComboBox<String> entrapmentSourceCombo = new JComboBox<>(new String[] {
+            ENTRAPMENT_SOURCE_SHUFFLE, ENTRAPMENT_SOURCE_FASTA });
+    private JTextField entrapmentDbField = new JTextField("");
+    private JSpinner entrapmentRatioSpinner =
+            new JSpinner(new SpinnerNumberModel(1.00, 0.10, 1.00, 0.05));
+    private JLabel entrapmentSourceLabel;
+    private JLabel entrapmentDbLabel;
+    private JLabel entrapmentRatioLabel;
+    private JButton entrapmentDbBrowseButton;
+    private JButton entrapmentDbDownloadButton;
+
     // Initial-library predictor for the Osprey workflows: Carafe's local AlphaPepDeep (default) or
     // a Koina-hosted model. Koina is opt-in and requires network.
     private JComboBox<String> initialLibraryPredictorCombo = new JComboBox<>(new String[] {
@@ -1782,6 +1798,64 @@ public class CarafeGUI extends JFrame {
                         + "Off by default; enable for Osprey-side entrapment-FDR validation.");
         row++;
 
+        // Entrapment source. Hidden until entrapment is enabled, so the panel is byte-identical
+        // to its previous layout for anyone not using it (GridBagLayout skips invisible children).
+        styleComboBox(entrapmentSourceCombo);
+        entrapmentSourceLabel = createLabel("    Entrapment source:",
+                "Where entrapment peptides come from.\n"
+                        + "Shuffle target sequence: a deterministic anagram of each target (default).\n"
+                        + "Peptides from FASTA: real peptides from a foreign proteome, mass-matched\n"
+                        + "1:1 to the targets so they compete in the same isolation window.");
+        gbc.gridx = 0;
+        gbc.gridy = row;
+        gbc.weightx = 0;
+        panel.add(entrapmentSourceLabel, gbc);
+        gbc.gridx = 1;
+        gbc.weightx = 1;
+        panel.add(entrapmentSourceCombo, gbc);
+        row++;
+
+        entrapmentDbLabel = createLabel("    Entrapment FASTA:",
+                "Foreign-species protein FASTA to draw entrapment peptides from.\n"
+                        + "Use a species distant enough that its peptides are absent from the sample;\n"
+                        + "Arabidopsis thaliana is the usual choice and is offered by Download.");
+        gbc.gridx = 0;
+        gbc.gridy = row;
+        gbc.weightx = 0;
+        panel.add(entrapmentDbLabel, gbc);
+        gbc.gridx = 1;
+        gbc.weightx = 1;
+        panel.add(entrapmentDbField, gbc);
+        gbc.gridx = 2;
+        gbc.weightx = 0;
+        panel.add(createEntrapmentDbButtons(), gbc);
+        row++;
+
+        entrapmentRatioLabel = createLabel("    Entrapment ratio:",
+                "Fraction of targets that carry an entrapment peptide.\n"
+                        + "1.00 pairs every target. Lower values make entrapment a thin overlay that\n"
+                        + "perturbs the target search less; the FDP estimate is ratio-aware and stays\n"
+                        + "stable down to 0.10, which is the lowest value that has been characterised.");
+        gbc.gridx = 0;
+        gbc.gridy = row;
+        gbc.weightx = 0;
+        panel.add(entrapmentRatioLabel, gbc);
+        gbc.gridx = 1;
+        gbc.weightx = 1;
+        // A spinner stretched across the panel puts its arrows an inch from its digits, so it
+        // sits in a left-aligned wrapper rather than filling the column like the text fields do.
+        JPanel ratioWrapper = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        ratioWrapper.setOpaque(false);
+        entrapmentRatioSpinner.setPreferredSize(new Dimension(90,
+                entrapmentRatioSpinner.getPreferredSize().height));
+        ratioWrapper.add(entrapmentRatioSpinner);
+        panel.add(ratioWrapper, gbc);
+        row++;
+
+        includeEntrapmentCheckbox.addActionListener(e -> updateEntrapmentRowVisibility());
+        entrapmentSourceCombo.addActionListener(e -> updateEntrapmentRowVisibility());
+        updateEntrapmentRowVisibility();
+
         Object[][] combos = {
                 { "Resolution:", ospreyResolutionCombo,
                         "Spectral resolution mode passed to Osprey (--resolution). Default: hram." },
@@ -2890,6 +2964,76 @@ public class CarafeGUI extends JFrame {
         panel.add(browseButton);
         panel.add(downloadButton);
         return panel;
+    }
+
+    /**
+     * Browse + Download for the entrapment FASTA, matching the pairing already used beside Train
+     * and Library Protein Database. Download opens the same UniProt dialog, which offers
+     * Arabidopsis thaliana - the proteome this feature was measured against.
+     */
+    private JPanel createEntrapmentDbButtons() {
+        JPanel panel = new JPanel(new GridLayout(1, 0, 5, 0));
+        panel.setOpaque(false);
+
+        entrapmentDbBrowseButton = new JButton("Browse");
+        styleButton(entrapmentDbBrowseButton);
+        entrapmentDbBrowseButton.setToolTipText("Select a foreign-species protein FASTA");
+        entrapmentDbBrowseButton.addActionListener(e -> {
+            FileNameExtensionFilter filter = new FileNameExtensionFilter(
+                    "FASTA Files (*.fasta, *.fa)", "fasta", "fa");
+            chooseFile("Select Entrapment FASTA", JFileChooser.FILES_ONLY, filter,
+                    f -> entrapmentDbField.setText(f.getAbsolutePath()));
+        });
+
+        entrapmentDbDownloadButton = new JButton("Download");
+        styleButton(entrapmentDbDownloadButton);
+        entrapmentDbDownloadButton.setToolTipText(
+                "Download a proteome from UniProt to use as the entrapment source");
+        entrapmentDbDownloadButton.addActionListener(e -> {
+            UniProtDownloadDialog dialog =
+                    new UniProtDownloadDialog(this, entrapmentDbField, outputDirField);
+            dialog.showDialog();
+        });
+
+        panel.add(entrapmentDbBrowseButton);
+        panel.add(entrapmentDbDownloadButton);
+        return panel;
+    }
+
+    /**
+     * Show the entrapment rows only when they apply: source and ratio when entrapment is on, and
+     * the FASTA row only when a FASTA source is selected.
+     *
+     * <p>Hidden rather than disabled, so the panel returns to exactly its previous layout when
+     * entrapment is off - {@link java.awt.GridBagLayout} skips invisible components, leaving no
+     * gap. Values are retained while hidden so toggling between the two entrapment arms does not
+     * mean re-picking a file; it is
+     * {@link #buildEntrapmentFastaCommand(String, String, String, boolean)} that must key off this
+     * logical state rather than field contents, so a hidden path cannot reach the command line.</p>
+     */
+    private void updateEntrapmentRowVisibility() {
+        boolean entrapment = includeEntrapmentCheckbox.isSelected();
+        boolean fromFasta = entrapment && isEntrapmentFromFasta();
+
+        entrapmentSourceLabel.setVisible(entrapment);
+        entrapmentSourceCombo.setVisible(entrapment);
+        entrapmentRatioLabel.setVisible(entrapment);
+        entrapmentRatioSpinner.getParent().setVisible(entrapment);
+
+        entrapmentDbLabel.setVisible(fromFasta);
+        entrapmentDbField.setVisible(fromFasta);
+        entrapmentDbBrowseButton.getParent().setVisible(fromFasta);
+
+        Container parent = includeEntrapmentCheckbox.getParent();
+        if (parent != null) {
+            parent.revalidate();
+            parent.repaint();
+        }
+    }
+
+    /** True when entrapment peptides should be drawn from a FASTA rather than shuffled. */
+    private boolean isEntrapmentFromFasta() {
+        return ENTRAPMENT_SOURCE_FASTA.equals(entrapmentSourceCombo.getSelectedItem());
     }
 
     private JPanel createFolderButton(JTextField targetField) {
@@ -7068,6 +7212,22 @@ public class CarafeGUI extends JFrame {
         args.add(maxPepChargeSpinner.getValue().toString());
         if (withEntrapment) {
             args.add("-entrapment");
+            // Keyed off the LOGICAL state, never off whether the field happens to hold a path.
+            // The FASTA row is hidden when the source is Shuffle but keeps its value, so a
+            // contents-based test would silently build a foreign-entrapment library for someone
+            // who had switched back.
+            if (isEntrapmentFromFasta()) {
+                String entrapmentDb = entrapmentDbField.getText().trim();
+                if (!entrapmentDb.isEmpty()) {
+                    args.add("-entrapment_db");
+                    args.add(entrapmentDb);
+                }
+            }
+            double ratio = ((Number) entrapmentRatioSpinner.getValue()).doubleValue();
+            if (Math.abs(ratio - 1.0) > 1e-9) {
+                args.add("-entrapment_ratio");
+                args.add(String.format(java.util.Locale.ROOT, "%.2f", ratio));
+            }
         }
 
         CmdTask task = new CmdTask(args, "Carafe", "Build target-decoy peptide FASTA for Osprey");
@@ -8186,6 +8346,9 @@ public class CarafeGUI extends JFrame {
         reg.add(textSetting("osprey_protein_fdr", ospreyProteinFdrField));
         reg.add(textSetting("osprey_additional_options", ospreyAdditionalOptionsField));
         reg.add(checkSetting("osprey_include_entrapment", includeEntrapmentCheckbox));
+        reg.add(comboSetting("osprey_entrapment_source", entrapmentSourceCombo));
+        reg.add(textSetting("osprey_entrapment_db", entrapmentDbField));
+        reg.add(spinnerSetting("osprey_entrapment_ratio", entrapmentRatioSpinner));
         reg.add(comboSetting("osprey_initial_predictor", initialLibraryPredictorCombo));
         reg.add(textSetting("koina_url", koinaUrlField));
         reg.add(textSetting("osprey_conversion_threads", ospreyConversionThreadsField));
@@ -8252,6 +8415,10 @@ public class CarafeGUI extends JFrame {
         // shows as plain editable text and is not recognized as a real multi-file selection.
         updateFileFieldState(trainMsFileField, trainMsFiles);
         updateFileFieldState(projectMsFileField, projectMsFiles);
+        // Entrapment rows are shown or hidden by state, and setting a control from a file does not
+        // fire its action listener - so a settings file with entrapment enabled would otherwise
+        // restore the values into rows that stay invisible.
+        updateEntrapmentRowVisibility();
 
         logToConsole("[INFO] Loaded settings from: " + file.getAbsolutePath() + "\n");
         logToConsole("       Applied " + applied + " of " + reg.size() + " known parameters.\n");
