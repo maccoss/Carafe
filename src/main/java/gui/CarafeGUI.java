@@ -127,6 +127,7 @@ public class CarafeGUI extends JFrame {
     private JLabel entrapmentRatioLabel;
     private JButton entrapmentDbBrowseButton;
     private JButton entrapmentDbDownloadButton;
+    private JPanel entrapmentDbRow;
 
     // Initial-library predictor for the Osprey workflows: Carafe's local AlphaPepDeep (default) or
     // a Koina-hosted model. Koina is opt-in and requires network.
@@ -1825,10 +1826,14 @@ public class CarafeGUI extends JFrame {
         panel.add(entrapmentDbLabel, gbc);
         gbc.gridx = 1;
         gbc.weightx = 1;
-        panel.add(entrapmentDbField, gbc);
-        gbc.gridx = 2;
-        gbc.weightx = 0;
-        panel.add(createEntrapmentDbButtons(), gbc);
+        // Field and buttons share ONE cell. This panel is two columns everywhere else - the info
+        // card at the bottom even spans gridwidth 2 - so adding a third column just for this row
+        // leaves every other row short of it and gives the buttons no width to occupy.
+        entrapmentDbRow = new JPanel(new BorderLayout(5, 0));
+        entrapmentDbRow.setOpaque(false);
+        entrapmentDbRow.add(entrapmentDbField, BorderLayout.CENTER);
+        entrapmentDbRow.add(createEntrapmentDbButtons(), BorderLayout.EAST);
+        panel.add(entrapmentDbRow, gbc);
         row++;
 
         entrapmentRatioLabel = createLabel("    Entrapment ratio:",
@@ -1846,6 +1851,9 @@ public class CarafeGUI extends JFrame {
         // sits in a left-aligned wrapper rather than filling the column like the text fields do.
         JPanel ratioWrapper = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         ratioWrapper.setOpaque(false);
+        // Two decimals always, so 1 reads as 1.00 and the step of 0.05 is legible in the value
+        // rather than only in the arrows.
+        entrapmentRatioSpinner.setEditor(new JSpinner.NumberEditor(entrapmentRatioSpinner, "0.00"));
         entrapmentRatioSpinner.setPreferredSize(new Dimension(90,
                 entrapmentRatioSpinner.getPreferredSize().height));
         ratioWrapper.add(entrapmentRatioSpinner);
@@ -3021,8 +3029,7 @@ public class CarafeGUI extends JFrame {
         entrapmentRatioSpinner.getParent().setVisible(entrapment);
 
         entrapmentDbLabel.setVisible(fromFasta);
-        entrapmentDbField.setVisible(fromFasta);
-        entrapmentDbBrowseButton.getParent().setVisible(fromFasta);
+        entrapmentDbRow.setVisible(fromFasta);
 
         Container parent = includeEntrapmentCheckbox.getParent();
         if (parent != null) {
