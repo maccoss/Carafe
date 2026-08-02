@@ -295,6 +295,42 @@ public class DecoySimilarityGateTest {
     }
 
     @Test
+    public void testEntrapmentRatioRejectsUntestedValues() throws IOException {
+        // A deliberate floor on an UNTESTED region rather than a claim that lower cannot work:
+        // the ratio sweep covered r = 1, 0.5, 0.25 and 0.1, and at 0.1 only ~32 entrapment
+        // peptides were accepted, so below that the estimate is counting noise. The error has to
+        // say so, otherwise a user hitting it cannot tell a measured limit from an arbitrary one.
+        Path in = write(TARGET_FASTA, "fe_target");
+        Path outFasta = Files.createTempFile("fe_out", ".fasta");
+        Path manifest = Files.createTempFile("fe_manifest", ".tsv");
+
+        EntrapmentFastaGear.Config cfg = foreignConfig(in, outFasta, manifest);
+        cfg.entrapmentRatio = 0.05;
+        try {
+            EntrapmentFastaGear.run(cfg);
+            Assert.fail("a ratio below the tested minimum must be rejected");
+        } catch (IllegalArgumentException e) {
+            Assert.assertTrue(e.getMessage().contains("tested minimum"),
+                    "the error must explain the bound is empirical, not arbitrary: "
+                            + e.getMessage());
+        }
+
+        cfg.entrapmentRatio = 1.5;
+        try {
+            EntrapmentFastaGear.run(cfg);
+            Assert.fail("a ratio above 1.0 must be rejected");
+        } catch (IllegalArgumentException e) {
+            Assert.assertTrue(e.getMessage().contains("cannot exceed 1.0"), e.getMessage());
+        }
+
+        // The boundary itself must be usable - an exclusive bound here would make the lowest
+        // characterised ratio unreachable.
+        cfg.entrapmentRatio = EntrapmentFastaGear.MIN_ENTRAPMENT_RATIO;
+        EntrapmentFastaGear.Result r = EntrapmentFastaGear.run(cfg);
+        Assert.assertTrue(r.keptQuartets > 0, "the minimum tested ratio must be accepted");
+    }
+
+    @Test
     public void testEntrapmentRatioLeavesSomeTargetsWithoutEntrapment() throws IOException {
         Path in = write(TARGET_FASTA, "fe_target");
         Path outFasta = Files.createTempFile("fe_out", ".fasta");

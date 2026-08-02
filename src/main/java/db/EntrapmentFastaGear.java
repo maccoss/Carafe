@@ -88,6 +88,20 @@ public class EntrapmentFastaGear {
         AA_MONO_MASS.put('W', 186.07931);
     }
 
+    /**
+     * Smallest entrapment ratio that has actually been characterised.
+     *
+     * <p>The ratio sweep this bound comes from ran r = 1, 0.5, 0.25 and 0.1. The combined
+     * estimator held steady at ~1.1% FDP across that whole range, which is the result that makes
+     * a thin overlay usable - but power falls with the pool, and at r = 0.1 only 32 entrapment
+     * peptides were accepted at 1% q. Below that the estimate is dominated by counting noise, and
+     * nobody has measured where it stops being meaningful.</p>
+     *
+     * <p>So this is a deliberate floor on an UNTESTED region, not a statement that lower values
+     * cannot work. If a real case needs one, widen it on purpose and record what was measured.</p>
+     */
+    public static final double MIN_ENTRAPMENT_RATIO = 0.1;
+
     /** Configuration for a peptide-FASTA build. Defaults match the Python script. */
     public static class Config {
         public String inputFasta;
@@ -110,10 +124,11 @@ public class EntrapmentFastaGear {
          */
         public String entrapmentSourceFasta = null;
         /**
-         * Fraction of targets that carry an entrapment peptide, in (0, 1]. 1.0 pairs every target.
-         * A smaller value makes entrapment a thin overlay that barely perturbs the target search,
-         * which measures FDP without distorting it - the estimator is ratio-aware, so the reported
-         * FDP stays comparable.
+         * Fraction of targets that carry an entrapment peptide, in
+         * [{@value #MIN_ENTRAPMENT_RATIO}, 1.0]. 1.0 pairs every target. A smaller value makes
+         * entrapment a thin overlay that barely perturbs the target search, which measures FDP
+         * without distorting it - the estimator is ratio-aware, so the reported FDP stays
+         * comparable.
          */
         public double entrapmentRatio = 1.0;
         /**
@@ -628,9 +643,22 @@ public class EntrapmentFastaGear {
      */
     private static void assignEntrapment(Config cfg, List<Quartet> quartets, Set<String> targetSet,
                                          Enzyme enzyme, DBGear dbGear, Result r) throws IOException {
-        if (cfg.entrapmentRatio <= 0.0 || cfg.entrapmentRatio > 1.0) {
+        if (cfg.entrapmentRatio > 1.0) {
             throw new IllegalArgumentException(
-                    "entrapment ratio must be in (0, 1]: " + cfg.entrapmentRatio);
+                    "entrapment ratio cannot exceed 1.0 (one entrapment peptide per target): "
+                            + cfg.entrapmentRatio);
+        }
+        if (cfg.entrapmentRatio < MIN_ENTRAPMENT_RATIO) {
+            throw new IllegalArgumentException(String.format(
+                    "entrapment ratio %.4f is below the tested minimum of %.2f. Ratios down to "
+                            + "%.2f are characterised (the combined FDP estimate is stable across "
+                            + "r = 1, 0.5, 0.25 and 0.1), but at %.2f only ~32 entrapment peptides "
+                            + "were accepted at 1%% q, so below it the estimate is dominated by "
+                            + "counting noise and has not been validated. If you have a case that "
+                            + "needs a lower ratio, raise it so the bound can be widened "
+                            + "deliberately.",
+                    cfg.entrapmentRatio, MIN_ENTRAPMENT_RATIO, MIN_ENTRAPMENT_RATIO,
+                    MIN_ENTRAPMENT_RATIO));
         }
         List<Quartet> ordered = new ArrayList<>(quartets);
         ordered.sort((a, b) -> a.target.compareTo(b.target));
