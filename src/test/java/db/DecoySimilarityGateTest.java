@@ -174,6 +174,101 @@ public class DecoySimilarityGateTest {
         }
     }
 
+    // --- I/L-isobaric collision rejection -------------------------------------------------
+
+    @Test
+    public void testIlNormalizeFoldsIsoleucineOntoLeucine() {
+        Assert.assertEquals(EntrapmentFastaGear.ilNormalize("PEPTIDEIK"), "PEPTLDELK");
+        // No isoleucine means no change, which is what makes the normalised comparison a
+        // superset of exact equality rather than a different test.
+        Assert.assertEquals(EntrapmentFastaGear.ilNormalize("PEPTLDELK"), "PEPTLDELK");
+        Assert.assertEquals(
+                EntrapmentFastaGear.ilNormalize("LLLL"), EntrapmentFastaGear.ilNormalize("IIII"));
+    }
+
+    @Test
+    public void testEntrapmentRejectsIlIsobaricMatchToADifferentTarget() {
+        // The point of this gate, and why the fragment-overlap gate cannot do it: overlap compares
+        // a candidate to its OWN paired target, while a collision is an exact isobaric match to a
+        // DIFFERENT one. Here the shuffle of one target lands I/L-identical to an unrelated target.
+        String target = "SAMPLERPEPTIDEK";
+        Set<String> targets = new HashSet<>();
+        targets.add(target);
+
+        String unguarded =
+                EntrapmentFastaGear.generateShuffledEntrapment(target, 42L, targets);
+        Assert.assertNotNull(unguarded, "control: this target should yield an entrapment");
+
+        // Now declare an unrelated target that is I/L-isobaric to that entrapment. Nothing about
+        // the candidate's relationship to its OWN target has changed, so the overlap gate still
+        // passes it - only the normalised collision index can reject it.
+        Assert.assertTrue(DecoySimilarityGate.isCandidateAcceptable(target, unguarded),
+                "the overlap gate does not object to this candidate");
+
+        Set<String> withCollider = new HashSet<>(targets);
+        withCollider.add(unguarded.replace('L', 'I'));
+        String guarded =
+                EntrapmentFastaGear.generateShuffledEntrapment(target, 42L, withCollider);
+        Assert.assertNotEquals(guarded, unguarded,
+                "an entrapment I/L-isobaric to any real target must be rejected");
+        if (guarded != null) {
+            Assert.assertFalse(
+                    EntrapmentFastaGear.ilNormalizedSet(withCollider)
+                            .contains(EntrapmentFastaGear.ilNormalize(guarded)),
+                    "whatever is emitted must not collide under I/L normalisation: " + guarded);
+        }
+    }
+
+    @Test
+    public void testDecoyAlsoRejectsIlIsobaricCollision() {
+        // A decoy indistinguishable from a real target is not a valid null either - it is detected
+        // wherever its twin is, which inflates the decoy count rather than the entrapment count.
+        String target = "PEPTLDEKPEPTLDEK";
+        Set<String> targets = new HashSet<>();
+        targets.add(target);
+        String plain = EntrapmentFastaGear.generateReverseDecoy(target, targets);
+        Assert.assertNotNull(plain, "control: this target should yield a decoy");
+
+        Set<String> withCollider = new HashSet<>(targets);
+        withCollider.add(plain.replace('L', 'I'));
+        String guarded = EntrapmentFastaGear.generateReverseDecoy(target, withCollider);
+        if (guarded != null) {
+            Assert.assertFalse(
+                    EntrapmentFastaGear.ilNormalizedSet(withCollider)
+                            .contains(EntrapmentFastaGear.ilNormalize(guarded)),
+                    "emitted decoy must not be I/L-isobaric to a target: " + guarded);
+        }
+    }
+
+    @Test
+    public void testAuditSwitchStillReproducesPreFixBehaviour() throws IOException {
+        // -no_similarity_gate exists to reproduce a pre-fix library byte for byte, which is the
+        // regression oracle for "does this generator still match the delivered library?". It must
+        // therefore skip I/L rejection too, not just the overlap gate - otherwise the oracle
+        // silently stops reproducing and the check it exists for is lost.
+        Path in = write(TARGET_FASTA, "il_target");
+        List<String> gatedOff = null;
+        for (boolean gate : new boolean[] { false, false }) {
+            Path outFasta = Files.createTempFile("il_out", ".fasta");
+            Path manifest = Files.createTempFile("il_manifest", ".tsv");
+            EntrapmentFastaGear.Config cfg = foreignConfig(in, outFasta, manifest);
+            cfg.similarityGate = gate;
+            EntrapmentFastaGear.run(cfg);
+            List<String> seqs = new ArrayList<>();
+            for (String[] row : manifestRows(manifest, "p_target")) {
+                seqs.add(row[1] + "=" + row[0]);
+            }
+            if (gatedOff == null) {
+                gatedOff = seqs;
+            } else {
+                Assert.assertEquals(seqs, gatedOff,
+                        "the audit switch must be deterministic across runs");
+            }
+        }
+        Assert.assertTrue(gatedOff != null && !gatedOff.isEmpty(),
+                "the audit path must still produce entrapment");
+    }
+
     // --- Foreign-species entrapment -------------------------------------------------------
 
     private static final String TARGET_FASTA =

@@ -205,6 +205,33 @@ public class EntrapmentFastaGear {
         public double entrapmentMedianAbsMassDelta;
         /** Fraction of foreign entrapment peptides co-locating with their target's window. */
         public double entrapmentInIsolationWindowFraction;
+        /** Foreign candidates excluded for being I/L-isobaric to a real target. */
+        public int entrapmentIlCollisionsDropped;
+    }
+
+    /**
+     * Isoleucine-to-leucine normalised form of a sequence.
+     *
+     * <p>I and L have identical residue masses (113.08406). Two sequences differing only by
+     * I&lt;-&gt;L substitutions are therefore mass-identical AND produce identical b/y ladders -
+     * mass spectrometry cannot tell them apart at all. A generated entrapment or decoy that is
+     * I/L-identical to a real target is not a model of a false discovery: it will be detected
+     * wherever its twin is present, and every such detection is counted as false when it is not.
+     *
+     * <p>Comparing normalised forms subsumes exact string comparison, since a sequence normalises
+     * to itself when it contains no isoleucine.</p>
+     */
+    public static String ilNormalize(String seq) {
+        return seq.indexOf('I') < 0 ? seq : seq.replace('I', 'L');
+    }
+
+    /** {@link #ilNormalize} applied across a set, for the one-off build of a collision index. */
+    public static Set<String> ilNormalizedSet(Set<String> sequences) {
+        Set<String> out = new HashSet<>(Math.max(16, (int) (sequences.size() / 0.7f) + 1));
+        for (String s : sequences) {
+            out.add(ilNormalize(s));
+        }
+        return out;
     }
 
     /** Monoisotopic residue masses, for {@link DecoySimilarityGate}'s theoretical ladder. Shared
@@ -366,21 +393,28 @@ public class EntrapmentFastaGear {
      * estimator counts them as such, inflating measured FDP by ~25%.</p>
      */
     public static String generateShuffledEntrapment(String seq, long masterSeed, Set<String> targetSet) {
-        return generateShuffledEntrapment(seq, masterSeed, targetSet, true);
+        return generateShuffledEntrapment(seq, masterSeed, targetSet, ilNormalizedSet(targetSet), true);
     }
 
     /**
      * As {@link #generateShuffledEntrapment(String, long, Set)}, with {@code gate} false
-     * reproducing the pre-gate behaviour: a single shuffle rejected only on an exact collision.
-     * For audit builds only - see {@link Config#similarityGate}.
+     * reproducing the pre-fix behaviour: a single shuffle rejected only on an EXACT collision, with
+     * neither the similarity gate nor I/L-normalised collision rejection. For audit builds only -
+     * see {@link Config#similarityGate}.
+     *
+     * @param targetSet   real target sequences, for the legacy exact-collision check
+     * @param targetSetIl the same set under {@link #ilNormalize}, built once by the caller
      */
     public static String generateShuffledEntrapment(String seq, long masterSeed,
-                                                    Set<String> targetSet, boolean gate) {
+                                                    Set<String> targetSet, Set<String> targetSetIl,
+                                                    boolean gate) {
         int attempts = gate ? MAX_ENTRAPMENT_SHUFFLE_ATTEMPTS : 1;
         for (int attempt = 0; attempt < attempts; attempt++) {
             String candidate = shufflePreservingCterm(seq, masterSeed, attempt);
-            if (!candidate.equals(seq)
-                    && !targetSet.contains(candidate)
+            if (candidate.equals(seq)) {
+                continue;
+            }
+            if (!collides(candidate, targetSet, targetSetIl, gate)
                     && (!gate || DecoySimilarityGate.isCandidateAcceptable(seq, candidate))) {
                 return candidate;
             }
@@ -433,29 +467,43 @@ public class EntrapmentFastaGear {
      * produced (the caller drops that target-decoy pair, as Osprey does).
      */
     public static String generateReverseDecoy(String seq, Set<String> targetSet) {
-        return generateReverseDecoy(seq, targetSet, true);
+        return generateReverseDecoy(seq, targetSet, ilNormalizedSet(targetSet), true);
     }
 
     /**
      * As {@link #generateReverseDecoy(String, Set)}, with {@code gate} false reproducing the
-     * pre-gate behaviour (exact-uniqueness rejection only). For audit builds only - see
+     * pre-fix behaviour (exact-uniqueness rejection only). For audit builds only - see
      * {@link Config#similarityGate}.
+     *
+     * @param targetSet   sequences the decoy must not collide with, for the legacy exact check
+     * @param targetSetIl the same set under {@link #ilNormalize}, built once by the caller
      */
-    public static String generateReverseDecoy(String seq, Set<String> targetSet, boolean gate) {
+    public static String generateReverseDecoy(String seq, Set<String> targetSet,
+                                              Set<String> targetSetIl, boolean gate) {
         String rev = reversePreservingCterm(seq);
-        if (!rev.equals(seq) && !targetSet.contains(rev)
+        if (!rev.equals(seq) && !collides(rev, targetSet, targetSetIl, gate)
                 && (!gate || DecoySimilarityGate.isCandidateAcceptable(seq, rev))) {
             return rev;
         }
         int maxRetries = Math.min(seq.length(), 10);
         for (int c = 1; c <= maxRetries; c++) {
             String cyc = cyclePreservingCterm(seq, c);
-            if (!cyc.equals(seq) && !targetSet.contains(cyc)
+            if (!cyc.equals(seq) && !collides(cyc, targetSet, targetSetIl, gate)
                     && (!gate || DecoySimilarityGate.isCandidateAcceptable(seq, cyc))) {
                 return cyc;
             }
         }
         return null;
+    }
+
+    /**
+     * True when a generated sequence is indistinguishable from something on the target side.
+     * Gated builds compare I/L-normalised forms, which subsumes exact equality; legacy audit
+     * builds keep the exact comparison so they still reproduce pre-fix output.
+     */
+    private static boolean collides(String candidate, Set<String> targetSet,
+                                    Set<String> targetSetIl, boolean gate) {
+        return gate ? targetSetIl.contains(ilNormalize(candidate)) : targetSet.contains(candidate);
     }
 
     /** Build the {@code db|accession|entry} label for a peptide kind. */
@@ -552,6 +600,11 @@ public class EntrapmentFastaGear {
         // Osprey's world, so decoys must dodge them too). Like Osprey, decoys are NOT checked against
         // other decoys. A target whose decoy cannot be made unique yields a null decoy, dropped below.
         Set<String> targetSet = targetToSources.keySet();
+        // Built once and reused for every candidate. I and L are isobaric, so a generated sequence
+        // whose I->L normalised form matches a real target is mass-identical to it with an
+        // identical fragment ladder - it will be detected wherever that target is, which makes it
+        // a genuinely present peptide rather than a model of a false one.
+        Set<String> targetSetIl = ilNormalizedSet(targetSet);
         List<Quartet> quartets = new ArrayList<>(targetToSources.size());
         for (Map.Entry<String, List<ProteinRecord>> e : targetToSources.entrySet()) {
             Quartet q = new Quartet(e.getKey());
@@ -559,7 +612,7 @@ public class EntrapmentFastaGear {
             quartets.add(q);
         }
         if (cfg.addEntrapment) {
-            assignEntrapment(cfg, quartets, targetSet, enzyme, dbGear, r);
+            assignEntrapment(cfg, quartets, targetSet, targetSetIl, enzyme, dbGear, r);
         }
         // Decoys stay unique against every real target PLUS every entrapment.
         Set<String> targetSideSet = new HashSet<>(targetSet);
@@ -570,11 +623,16 @@ public class EntrapmentFastaGear {
                 }
             }
         }
+        Set<String> targetSideSetIl = cfg.addEntrapment
+                ? ilNormalizedSet(targetSideSet)
+                : targetSetIl;
         if (cfg.addDecoys) {
             for (Quartet q : quartets) {
-                q.decoy = generateReverseDecoy(q.target, targetSideSet, cfg.similarityGate);
+                q.decoy = generateReverseDecoy(
+                        q.target, targetSideSet, targetSideSetIl, cfg.similarityGate);
                 if (cfg.addEntrapment && q.pTarget != null) {
-                    q.pDecoy = generateReverseDecoy(q.pTarget, targetSideSet, cfg.similarityGate);
+                    q.pDecoy = generateReverseDecoy(
+                            q.pTarget, targetSideSet, targetSideSetIl, cfg.similarityGate);
                 }
             }
         }
@@ -642,7 +700,8 @@ public class EntrapmentFastaGear {
      * where each draw consumes a peptide and therefore changes what later targets can get.</p>
      */
     private static void assignEntrapment(Config cfg, List<Quartet> quartets, Set<String> targetSet,
-                                         Enzyme enzyme, DBGear dbGear, Result r) throws IOException {
+                                         Set<String> targetSetIl, Enzyme enzyme, DBGear dbGear,
+                                         Result r) throws IOException {
         if (cfg.entrapmentRatio > 1.0) {
             throw new IllegalArgumentException(
                     "entrapment ratio cannot exceed 1.0 (one entrapment peptide per target): "
@@ -688,7 +747,7 @@ public class EntrapmentFastaGear {
         if (cfg.entrapmentSourceFasta == null) {
             for (Quartet q : selected) {
                 q.pTarget = generateShuffledEntrapment(
-                        q.target, cfg.entrapmentSeed, targetSet, cfg.similarityGate);
+                        q.target, cfg.entrapmentSeed, targetSet, targetSetIl, cfg.similarityGate);
                 if (q.pTarget == null) {
                     r.droppedNoEntrapment++;
                 }
@@ -699,8 +758,9 @@ public class EntrapmentFastaGear {
         Cloger.getInstance().logger.info(
                 "Drawing entrapment from foreign proteome: " + cfg.entrapmentSourceFasta);
         ForeignEntrapmentSource pool = ForeignEntrapmentSource.build(
-                cfg.entrapmentSourceFasta, enzyme, dbGear, targetSet,
+                cfg.entrapmentSourceFasta, enzyme, dbGear, targetSet, targetSetIl,
                 cfg.applyMzFilter, cfg.charges, cfg.minMz, cfg.maxMz);
+        r.entrapmentIlCollisionsDropped = pool.ilCollisionsDropped();
         if (pool.available() < selected.size()) {
             // Not fatal - the shortfall shows up as dropped quartets and a lower achieved ratio -
             // but it silently changes what was asked for, so say so before it happens.

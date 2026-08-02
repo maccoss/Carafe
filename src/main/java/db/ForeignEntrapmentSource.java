@@ -76,6 +76,7 @@ public final class ForeignEntrapmentSource {
     private final double minMass;
     private int available;
     private int total;
+    private int ilCollisionsDropped;
 
     @SuppressWarnings("unchecked")
     private ForeignEntrapmentSource(int nBins, double minMass) {
@@ -94,21 +95,39 @@ public final class ForeignEntrapmentSource {
     }
 
     /**
+     * Foreign peptides excluded because they are I/L-isobaric to a real target. Reported because
+     * an exact-string audit shows none of these, so without the count there is no visible evidence
+     * the filter did anything.
+     */
+    public int ilCollisionsDropped() {
+        return ilCollisionsDropped;
+    }
+
+    /**
      * Digest a foreign proteome into an assignment pool.
      *
      * @param fastaPath     foreign-species protein FASTA (e.g. Arabidopsis UP000006548)
      * @param enzyme        same enzyme used for the target digest
      * @param dbGear        digester (shares the global CParameter digest options)
-     * @param excluded      real target sequences - a foreign peptide equal to one of these is not
-     *                      absent from the sample, so it cannot serve as entrapment
+     * @param excludedIl    real target sequences under {@link EntrapmentFastaGear#ilNormalize} - a
+     *                      foreign peptide matching one of these is not absent from the sample, so
+     *                      it cannot serve as entrapment. Normalised rather than exact because I
+     *                      and L are isobaric: a foreign peptide differing from a human target only
+     *                      by I&lt;-&gt;L is mass-identical to it with an identical fragment ladder,
+     *                      and will be detected wherever that target is. This is the filter
+     *                      foreign proteomes need most - plant and human share conserved proteins
+     *                      whose tryptic peptides differ by exactly such conservative
+     *                      substitutions, which an exact-string comparison reports as clean.
      * @param applyMzFilter whether to require the peptide fit the precursor m/z window
      */
     public static ForeignEntrapmentSource build(String fastaPath, Enzyme enzyme, DBGear dbGear,
-                                                Set<String> excluded, boolean applyMzFilter,
+                                                Set<String> excluded, Set<String> excludedIl,
+                                                boolean applyMzFilter,
                                                 int[] charges, double minMz, double maxMz)
             throws IOException {
         int proteins = 0;
         int droppedHomologous = 0;
+        int droppedIlCollision = 0;
         int droppedUnknownAa = 0;
         int droppedOutOfMz = 0;
         Set<String> seen = new HashSet<>();
@@ -135,6 +154,13 @@ public final class ForeignEntrapmentSource {
                     }
                     if (excluded.contains(pep)) {
                         droppedHomologous++;
+                        continue;
+                    }
+                    if (excludedIl.contains(EntrapmentFastaGear.ilNormalize(pep))) {
+                        // Counted separately because this is the one an exact-string audit reports
+                        // as clean: the peptide is not equal to any target, but is isobaric to one
+                        // with the same fragment ladder, so it is detected wherever that target is.
+                        droppedIlCollision++;
                         continue;
                     }
                     Double mass = EntrapmentFastaGear.peptideNeutralMass(pep);
@@ -176,10 +202,13 @@ public final class ForeignEntrapmentSource {
             pool.add(keptSeqs.get(idx), keptMasses.get(idx));
         }
 
+        pool.ilCollisionsDropped = droppedIlCollision;
         Cloger.getInstance().logger.info(String.format(
                 "Foreign entrapment source: %d proteins -> %d unique candidate peptides "
-                        + "(%d dropped equal to a real target, %d unknown AA, %d out of m/z range)",
-                proteins, pool.total, droppedHomologous, droppedUnknownAa, droppedOutOfMz));
+                        + "(%d dropped equal to a real target, %d dropped I/L-isobaric to a real "
+                        + "target, %d unknown AA, %d out of m/z range)",
+                proteins, pool.total, droppedHomologous, droppedIlCollision, droppedUnknownAa,
+                droppedOutOfMz));
         return pool;
     }
 
