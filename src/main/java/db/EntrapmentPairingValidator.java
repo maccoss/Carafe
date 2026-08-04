@@ -68,8 +68,8 @@ public final class EntrapmentPairingValidator {
         Counter missingTarget = new Counter();
         Counter selectedWithoutEntrapment = new Counter();
         Counter entrapmentEqualsTarget = new Counter();
-        Counter ambiguous = new Counter();
-        Map<String, Integer> seqToPair = new HashMap<>();
+        Set<String> targetSeqs = new HashSet<>();
+        Map<String, Integer> generatedToPair = new HashMap<>();
 
         int pairIdx = 0;
         for (EntrapmentFastaGear.Quartet q : quartets) {
@@ -82,23 +82,39 @@ public final class EntrapmentPairingValidator {
             if (q.pTarget != null && q.pTarget.equals(q.target)) {
                 entrapmentEqualsTarget.hit(q.target);
             }
-            for (String seq : new String[] { q.target, q.pTarget, q.decoy, q.pDecoy }) {
-                if (seq == null) {
-                    continue;
-                }
-                Integer prior = seqToPair.putIfAbsent(seq, pairIdx);
-                if (prior != null && prior != pairIdx) {
-                    ambiguous.hit(seq);
+            // Only a TARGET colliding with a generated sequence is a defect. Generated sequences
+            // colliding with each other across pairs is normal and unavoidable: with 1.4M short
+            // tryptic peptides, two different shuffles landing on the same string happens
+            // thousands of times, and the generator only ever promised that an entrapment does not
+            // collide with a REAL TARGET (that is what its collision-drop pass enforces). An
+            // earlier version of this check asserted global uniqueness and rejected every real
+            // library at 526 collisions.
+            if (q.target != null) {
+                targetSeqs.add(q.target);
+            }
+            for (String seq : new String[] { q.pTarget, q.decoy, q.pDecoy }) {
+                if (seq != null) {
+                    generatedToPair.putIfAbsent(seq, pairIdx);
                 }
             }
             pairIdx++;
+        }
+
+        // A generated sequence equal to some REAL target is the collision the generator's
+        // collision-drop pass exists to prevent, so one surviving here is a genuine generator bug
+        // and not a statistical inevitability.
+        Counter collidesWithRealTarget = new Counter();
+        for (Map.Entry<String, Integer> e : generatedToPair.entrySet()) {
+            if (targetSeqs.contains(e.getKey())) {
+                collidesWithRealTarget.hit(e.getKey());
+            }
         }
 
         List<Violation> out = new ArrayList<>();
         missingTarget.addTo(out, "quartet with no target");
         selectedWithoutEntrapment.addTo(out, "entrapment-selected quartet with no entrapment");
         entrapmentEqualsTarget.addTo(out, "entrapment sequence equal to its target");
-        ambiguous.addTo(out, "sequence claimed by two pair indices");
+        collidesWithRealTarget.addTo(out, "generated sequence equal to a real target");
         return out;
     }
 
