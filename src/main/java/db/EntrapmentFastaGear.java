@@ -891,6 +891,15 @@ public class EntrapmentFastaGear {
     }
 
     private static void writeManifest(Config cfg, List<Quartet> kept) throws IOException {
+        // Refuse to emit a pairing a paired FDP estimator cannot consume. Downstream this used to
+        // surface hours into a search, as a crash or a quietly mis-scaled FDP; here it costs a
+        // pass over the quartets we already have in memory.
+        List<EntrapmentPairingValidator.Violation> bad =
+                EntrapmentPairingValidator.validateQuartets(kept);
+        if (!bad.isEmpty()) {
+            throw new IllegalStateException("Entrapment manifest failed integrity checks: "
+                    + EntrapmentPairingValidator.describe(bad));
+        }
         Cloger.getInstance().logger.info("Writing manifest: " + cfg.manifest);
         File out = new File(cfg.manifest);
         if (out.getParentFile() != null) {
