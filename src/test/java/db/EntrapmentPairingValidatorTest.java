@@ -72,6 +72,32 @@ public class EntrapmentPairingValidatorTest {
                         + EntrapmentPairingValidator.describe(v));
     }
 
+    /**
+     * At an entrapment ratio below 1.0 most targets deliberately carry no entrapment, so the
+     * manifest simply omits their {@code p_target} row. Those must not be reported: one violation
+     * per unentrapped target would bury the real signal, and at r=0.1 that is 90% of the library.
+     */
+    @Test
+    public void testRatioBelowOneDoesNotFlagDeliberatelyUnentrappedTargets() {
+        // Pair 0 carries entrapment; pair 1 was not selected (no p_target row at all).
+        Map<String, Integer> pairs = new HashMap<>();
+        pairs.put("TGTAAAK", 0);
+        pairs.put("MENTAAAK", 0);
+        pairs.put("TGTBBBK", 1);
+        Map<String, String> types = new HashMap<>();
+        types.put("TGTAAAK", "target");
+        types.put("MENTAAAK", "p_target");
+        types.put("TGTBBBK", "target");
+
+        List<EntrapmentPairingValidator.Violation> v =
+                EntrapmentPairingValidator.validateLibraryAgainstManifest(
+                        Arrays.asList("MENTAAAK"), Arrays.asList("TGTAAAK", "TGTBBBK"), pairs, types);
+
+        Assert.assertTrue(v.isEmpty(),
+                "a target the manifest never selected for entrapment is by design, not a defect; got: "
+                        + EntrapmentPairingValidator.describe(v));
+    }
+
     @Test
     public void testTargetWithNoEntrapmentCoverageIsReported() {
         // The quieter half: nothing crashes, but this target's entrapment ratio is zero, so it

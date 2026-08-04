@@ -161,21 +161,34 @@ public final class EntrapmentPairingValidator {
             }
         }
 
+        // Only pairs the manifest actually gave an entrapment can be "uncovered". At an entrapment
+        // ratio below 1.0 most targets deliberately have none, and flagging those would bury the
+        // real signal under one violation per unentrapped target - so absence in the MANIFEST means
+        // by design, and only absence in the LIBRARY of an entrapment the manifest does list is a
+        // defect.
         Counter uncoveredTargets = new Counter();
         for (String t : libraryTargets) {
             Integer idx = manifestPairs.get(t);
-            String requiredEntrapment;
+            String manifestEntrapment;
+            boolean clipped = false;
             if (idx != null) {
-                requiredEntrapment = entrapmentOfPair.get(idx);
+                manifestEntrapment = entrapmentOfPair.get(idx);
             } else {
                 Integer clippedIdx = manifestPairs.get("M" + t);
                 if (clippedIdx == null) {
                     continue;
                 }
-                String e = entrapmentOfPair.get(clippedIdx);
-                requiredEntrapment = (e != null && e.startsWith("M")) ? e.substring(1) : null;
+                manifestEntrapment = entrapmentOfPair.get(clippedIdx);
+                clipped = true;
             }
-            if (requiredEntrapment == null || !libEntrapmentSet.contains(requiredEntrapment)) {
+            if (manifestEntrapment == null) {
+                continue; // by design: this pair was never selected to carry entrapment
+            }
+            String required = manifestEntrapment;
+            if (clipped) {
+                required = manifestEntrapment.startsWith("M") ? manifestEntrapment.substring(1) : null;
+            }
+            if (required == null || !libEntrapmentSet.contains(required)) {
                 uncoveredTargets.hit(t);
             }
         }
