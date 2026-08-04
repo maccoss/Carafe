@@ -42,6 +42,7 @@ import net.sf.jfasta.FASTAFileReader;
 import net.sf.jfasta.impl.FASTAElementIterator;
 import net.sf.jfasta.impl.FASTAFileReaderImpl;
 import main.java.ai.FileIO;
+import main.java.db.DBGear;
 import tech.tablesaw.api.DoubleColumn;
 import tech.tablesaw.api.LongColumn;
 import tech.tablesaw.api.StringColumn;
@@ -1016,7 +1017,9 @@ class  RankLabelGenerator{
             proteinSequence = proteinSequence.replaceAll("I", "L");
         }
         HashSet<String> peptides = enzyme.digest(proteinSequence, RParameter.maxMissedCleavages, RParameter.minPeptideLength, RParameter.maxPeptideLength);
-        if(RParameter.clip_nTerm_M && proteinSequence.startsWith("M")){
+        // Same guard as DBGear.digest_protein: Met excision is a protein-N-terminus property and
+        // must not fire under NoCut, where the entries are already peptides.
+        if(RParameter.clip_nTerm_M && !DBGear.isNoCutEnzyme(enzyme) && proteinSequence.startsWith("M")){
             List<String> n_term_peptides = peptides.stream().filter(proteinSequence::startsWith).filter(pep -> pep.length() >= (RParameter.minPeptideLength+1)).map(pep -> pep.substring(1)).collect(toList());
             if(!n_term_peptides.isEmpty()){
                 peptides.addAll(n_term_peptides);

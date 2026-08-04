@@ -123,7 +123,17 @@ public class DBGear {
             proteinSequence = proteinSequence.replaceAll("I", "L");
         }
         HashSet<String> peptides = enzyme.digest(proteinSequence, CParameter.maxMissedCleavages, CParameter.minPeptideLength, CParameter.maxPeptideLength);
-        if(CParameter.clip_nTerm_M && proteinSequence.startsWith("M")){
+        // Protein N-terminal Met excision is a property of a PROTEIN N-terminus, so it must not
+        // fire under NoCut, where each FASTA entry is already a peptide and there is no protein
+        // context to excise from. Without this guard the prefix filter below is trivially true
+        // (the entry IS the "protein"), so every M-initial peptide silently gains a clipped copy
+        // that no digest ever produced. On the peptide-level FASTA path that is actively harmful:
+        // a target and its entrapment are separate entries and the entrapment shuffle preserves
+        // only the C-terminus, so M-initial status is uncorrelated within a quartet and the clip
+        // fires on one side only - leaving entrapment peptides with no target twin, which a
+        // paired FDP estimator (FDRBench) cannot consume, and clipped targets with no entrapment
+        // coverage, which silently dilute the entrapment ratio.
+        if(CParameter.clip_nTerm_M && !isNoCutEnzyme(enzyme) && proteinSequence.startsWith("M")){
             List<String> n_term_peptides = peptides.stream().filter(proteinSequence::startsWith).filter(pep -> pep.length() >= (CParameter.minPeptideLength+1)).map(pep -> pep.substring(1)).toList();
             if(!n_term_peptides.isEmpty()){
                 peptides.addAll(n_term_peptides);
@@ -392,6 +402,20 @@ public class DBGear {
      */
     public static boolean isNonSpecificEnzyme(){
         return DBGear.getEnzymeByIndex(CParameter.enzyme).getName().equalsIgnoreCase("non-specific");
+    }
+
+    /** Name of the pass-through pseudo-enzyme registered by {@link #init_enzymes()}. */
+    public static final String NO_CUT_ENZYME_NAME = "NoCut";
+
+    /**
+     * True when the digest is the {@code NoCut} pass-through, i.e. the FASTA entries are ALREADY
+     * peptides and no cleavage is to be performed.
+     *
+     * <p>Takes the enzyme as an argument rather than reading {@link CParameter#enzyme} so it
+     * answers for the digest actually being run, which is what the callers below have in hand.</p>
+     */
+    public static boolean isNoCutEnzyme(Enzyme enzyme){
+        return enzyme != null && NO_CUT_ENZYME_NAME.equalsIgnoreCase(enzyme.getName());
     }
 
     public static int getEnzymeIndexByName(String enzyme_name){
