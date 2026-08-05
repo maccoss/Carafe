@@ -47,9 +47,14 @@ import java.util.Set;
  * <p>This implementation bins the pool finely and serves each target from the nearest non-empty
  * bin within the co-location window. Inside the window every candidate satisfies the objective
  * equally, so bins are consumed in O(1) with no search, and the preference for nearer bins keeps
- * the mass match tight as a secondary benefit. A target whose window is exhausted falls through to
- * an unbounded search, so it still gets an entrapment peptide - just not a co-locating one, which
- * is counted and reported rather than hidden.</p>
+ * the mass match tight as a secondary benefit.</p>
+ *
+ * <p>A target whose window is EMPTY falls through to an unbounded search, so it still gets an
+ * entrapment peptide - just not a co-locating one, which is counted and reported rather than
+ * hidden. A target whose window held candidates that all FAILED the similarity gate is a different
+ * case and is dropped instead: widening the radius gives no reason to expect a better ladder
+ * match, only a worse mass match. The two exhaustion modes deliberately do not share an
+ * outcome.</p>
  *
  * <p><b>Determinism.</b> Bins are filled in mass-sorted order and consumed in a caller-fixed
  * order, so the same inputs always produce the same pairing.</p>
@@ -236,57 +241,79 @@ public final class ForeignEntrapmentSource {
      * @return the assigned peptide, or {@code null} if the pool is exhausted
      */
     public String assign(String targetSeq, double targetMass) {
-        String hit = search(targetSeq, targetMass, CO_LOCATION_BINS);
-        if (hit != null) {
-            return hit;
+        // Nothing left to serve. Without this the two scans below still walk every bin in the
+        // pool, per target, finding them all empty - and an exhausted pool is an ANTICIPATED
+        // state (build() warns when the pool is smaller than the selected target set), so on a
+        // 1.4M-target build that is minutes of pure no-op scanning.
+        if (available == 0) {
+            return null;
         }
-        // Window exhausted. Take the nearest available anywhere rather than leaving the target
-        // without entrapment - the shortfall is reported as a co-location rate, not silently.
-        return search(targetSeq, targetMass, bins.length);
-    }
-
-    /** Nearest non-empty bin within {@code maxBins}, serving one peptide that passes the gate. */
-    private String search(String targetSeq, double targetMass, int maxBins) {
-        int home = binOf(targetMass);
-        int rejected = 0;
-        List<String> putBack = null;
+        // One gate budget shared across both scans, and candidates rejected by the first are held
+        // aside rather than returned to the pool between them. Restarting the scan with a fresh
+        // budget - as this used to - re-polled the same near neighbours, spent the budget on them
+        // again, and returned null before ever widening, so the "unbounded" fallback below could
+        // not actually reach past the co-location window.
+        int[] budget = { MAX_GATE_ATTEMPTS };
+        List<String> putBack = new ArrayList<>();
         try {
-            for (int radius = 0; radius <= maxBins; radius++) {
-                for (int sign = 0; sign < (radius == 0 ? 1 : 2); sign++) {
-                    int b = home + (sign == 0 ? radius : -radius);
-                    if (b < 0 || b >= bins.length || bins[b] == null || bins[b].isEmpty()) {
-                        continue;
-                    }
-                    while (!bins[b].isEmpty() && rejected < MAX_GATE_ATTEMPTS) {
-                        String candidate = bins[b].poll();
-                        available--;
-                        if (DecoySimilarityGate.isCandidateAcceptable(targetSeq, candidate)) {
-                            return candidate;
-                        }
-                        if (putBack == null) {
-                            putBack = new ArrayList<>();
-                        }
-                        putBack.add(candidate);
-                        rejected++;
-                    }
-                    if (rejected >= MAX_GATE_ATTEMPTS) {
-                        return null;
-                    }
-                }
+            String hit = search(targetSeq, targetMass, 0, CO_LOCATION_BINS, budget, putBack);
+            if (hit != null) {
+                return hit;
             }
+            if (budget[0] <= 0) {
+                // The window had candidates; they all failed the gate. Widening cannot help within
+                // any sane bound, so drop the target - counted and reported by the caller.
+                return null;
+            }
+            // The window was genuinely EMPTY. Take the nearest available anywhere rather than
+            // leaving the target unpaired; the mass match is then poor, which shows up in the
+            // reported co-location rate rather than being hidden.
+            return search(targetSeq, targetMass, CO_LOCATION_BINS + 1, bins.length, budget, putBack);
         } finally {
             // Rejected candidates go back: a different target with a different ladder can use them.
-            if (putBack != null) {
-                for (String s : putBack) {
-                    Double m = EntrapmentFastaGear.peptideNeutralMass(s);
-                    if (m != null) {
-                        int b = binOf(m);
-                        if (bins[b] == null) {
-                            bins[b] = new ArrayDeque<>();
-                        }
-                        bins[b].add(s);
-                        available++;
+            for (String s : putBack) {
+                Double m = EntrapmentFastaGear.peptideNeutralMass(s);
+                if (m != null) {
+                    int b = binOf(m);
+                    if (bins[b] == null) {
+                        bins[b] = new ArrayDeque<>();
                     }
+                    bins[b].add(s);
+                    available++;
+                }
+            }
+        }
+    }
+
+    /**
+     * Nearest non-empty bin at a radius in {@code [minRadius, maxRadius]}, serving one peptide that
+     * passes the gate.
+     *
+     * @param budget  single-element box holding the remaining gate-rejection allowance, decremented
+     *                in place so a caller can continue one budget across successive radius ranges
+     * @param putBack accumulates gate-rejected candidates; the CALLER returns them to the pool, so
+     *                they are not re-polled by a later scan in the same assignment
+     */
+    private String search(String targetSeq, double targetMass, int minRadius, int maxRadius,
+                          int[] budget, List<String> putBack) {
+        int home = binOf(targetMass);
+        for (int radius = minRadius; radius <= maxRadius; radius++) {
+            for (int sign = 0; sign < (radius == 0 ? 1 : 2); sign++) {
+                int b = home + (sign == 0 ? radius : -radius);
+                if (b < 0 || b >= bins.length || bins[b] == null || bins[b].isEmpty()) {
+                    continue;
+                }
+                while (!bins[b].isEmpty() && budget[0] > 0) {
+                    String candidate = bins[b].poll();
+                    available--;
+                    if (DecoySimilarityGate.isCandidateAcceptable(targetSeq, candidate)) {
+                        return candidate;
+                    }
+                    putBack.add(candidate);
+                    budget[0]--;
+                }
+                if (budget[0] <= 0) {
+                    return null;
                 }
             }
         }

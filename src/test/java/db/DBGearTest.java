@@ -3,6 +3,7 @@ package test.java.db;
 import com.compomics.util.experiment.biology.enzymes.Enzyme;
 import main.java.db.DBGear;
 import main.java.input.CParameter;
+import main.java.input.PeptideUtils;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -60,6 +61,50 @@ public class DBGearTest {
         Assert.assertTrue(peptides.contains("MPEPTIDEK"), "NoCut must keep the peptide as-is");
         Assert.assertFalse(peptides.contains("PEPTIDEK"),
                 "NoCut must not clip the N-terminal methionine");
+    }
+
+    /**
+     * The sibling of the clip guard, one line below it. PeptideUtils.protein_n_term_peptides gates
+     * modn_protein variable mods, and its "peptide is a prefix of the protein" filter is vacuous
+     * under NoCut - the entry IS the protein - so every peptide in a peptide-level FASTA would be
+     * recorded as a protein N-terminus and become eligible for e.g. Acetyl (protein N-term).
+     */
+    @Test
+    public void noCutRegistersNoProteinNTermPeptides() {
+        DBGear.init_enzymes();
+        permissiveDigestParams();
+        PeptideUtils.protein_n_term_peptides.clear();
+        DBGear g = new DBGear();
+        Enzyme noCut = DBGear.getEnzymeByIndex(DBGear.getEnzymeIndexByName("NoCut"));
+
+        g.digest_protein(noCut, "MPEPTIDEK");
+        g.digest_protein(noCut, "SAMPLERPEPTIDEK");
+
+        Assert.assertFalse(PeptideUtils.protein_n_term_peptides.contains("MPEPTIDEK"),
+                "NoCut has no protein context and must claim no protein N-terminus");
+        Assert.assertFalse(PeptideUtils.protein_n_term_peptides.contains("SAMPLERPEPTIDEK"),
+                "an interior tryptic peptide must never be registered as a protein N-terminus");
+    }
+
+    /**
+     * The other half: a real digest must still register its genuine protein N-terminal peptides,
+     * or the guard above could be satisfied by never populating the set at all - which would
+     * silently drop protein N-terminal modifications from every ordinary run.
+     */
+    @Test
+    public void realEnzymeStillRegistersProteinNTermPeptides() {
+        DBGear.init_enzymes();
+        permissiveDigestParams();
+        PeptideUtils.protein_n_term_peptides.clear();
+        DBGear g = new DBGear();
+        Enzyme trypsin = DBGear.getEnzymeByIndex(DBGear.getEnzymeIndexByName("Trypsin"));
+
+        g.digest_protein(trypsin, "MAAAAAKMPEPTIDEK");
+
+        Assert.assertTrue(PeptideUtils.protein_n_term_peptides.contains("MAAAAAK"),
+                "the protein's leading peptide is a genuine protein N-terminus");
+        Assert.assertFalse(PeptideUtils.protein_n_term_peptides.contains("MPEPTIDEK"),
+                "an internal M-starting peptide is not a protein N-terminus");
     }
 
     @Test

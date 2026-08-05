@@ -840,8 +840,9 @@ public class EntrapmentFastaGear {
             java.util.Arrays.sort(sorted);
             int inWindow = 0;
             for (int i = 0; i < nDeltas; i++) {
-                // Narrowest common DIA isolation width, at the lowest charge considered.
-                if (massDeltas[i] / 2.0 < 3.0) {
+                // CO_LOCATION_WINDOW_DA (6 Da neutral) expressed as m/z at charge 2, i.e. the
+                // pair sits within +/-3 m/z - a 6 m/z span, not a 3 m/z one.
+                if (massDeltas[i] / 2.0 < ForeignEntrapmentSource.CO_LOCATION_WINDOW_DA / 2.0) {
                     inWindow++;
                 }
             }
@@ -849,7 +850,7 @@ public class EntrapmentFastaGear {
             r.entrapmentInIsolationWindowFraction = (double) inWindow / nDeltas;
             Cloger.getInstance().logger.info(String.format(
                     "Foreign entrapment mass match: median |dm| %.4f Da, 90th %.4f, 99th %.4f, "
-                            + "max %.2f; %.2f%% within a 3 m/z isolation window at charge 2",
+                            + "max %.2f; %.2f%% within +/-3 m/z of their target at charge 2",
                     sorted[nDeltas / 2], sorted[(int) (0.90 * (nDeltas - 1))],
                     sorted[(int) (0.99 * (nDeltas - 1))], sorted[nDeltas - 1],
                     100.0 * r.entrapmentInIsolationWindowFraction));

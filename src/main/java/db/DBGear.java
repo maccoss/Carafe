@@ -135,8 +135,17 @@ public class DBGear {
                 PeptideUtils.protein_n_term_peptides.addAll(n_term_peptides);
             }
         }
-        // add the original protein n-term peptides
-        PeptideUtils.protein_n_term_peptides.addAll(peptides.stream().filter(proteinSequence::startsWith).toList());
+        // Add the original protein n-term peptides. Skipped under NoCut for the same reason the
+        // clip above is: the filter asks "is this peptide a prefix of the protein?", which is
+        // vacuously true when the entry IS the protein, so every peptide in a peptide-level FASTA
+        // would be recorded as a protein N-terminus. That set gates modn_protein variable mods in
+        // PeptideUtils.calcPeptideIsoforms, so with e.g. "Acetyl of protein N-term" selected the
+        // whole library - targets, entrapment and decoys alike - would acquire an acetylated form
+        // that only a genuine protein N-terminus should have. NoCut carries no protein context, so
+        // it cannot know which of its entries were protein N-terminal, and must claim none.
+        if(!isNoCutEnzyme(enzyme)) {
+            PeptideUtils.protein_n_term_peptides.addAll(peptides.stream().filter(proteinSequence::startsWith).toList());
+        }
         return peptides;
     }
 

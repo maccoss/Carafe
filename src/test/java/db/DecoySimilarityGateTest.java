@@ -240,8 +240,35 @@ public class DecoySimilarityGateTest {
         }
     }
 
+    /**
+     * The audit switch must actually change generation, not merely be accepted. Asserted on the
+     * one pair where the expected output is knowable in advance: {@code ALLIAK} is the plain
+     * C-term-preserving reversal of {@code AILLAK} and overlaps its ladder completely (L/I are
+     * isobaric), so the gate must reject it and the pre-fix path must emit it.
+     *
+     * <p>This is the assertion the byte-for-byte reproduction claim rests on. The 349 MB SHA-256
+     * check that motivates {@code -no_similarity_gate} cannot live in a unit suite, so what is
+     * pinned here is the property underneath it: with the gate off, generation is the unretried,
+     * exact-collision-only behaviour it was before.</p>
+     */
     @Test
-    public void testAuditSwitchStillReproducesPreFixBehaviour() throws IOException {
+    public void testAuditSwitchRestoresPreFixGeneration() {
+        Set<String> noTargets = Collections.emptySet();
+        Set<String> noTargetsIl = EntrapmentFastaGear.ilNormalizedSet(noTargets);
+
+        String ungated = EntrapmentFastaGear.generateReverseDecoy(
+                ISOBARIC_TARGET, noTargets, noTargetsIl, false);
+        Assert.assertEquals(ungated, ISOBARIC_REVERSAL,
+                "with the gate off, the pre-fix path must emit the plain reversal it always did");
+
+        String gated = EntrapmentFastaGear.generateReverseDecoy(
+                ISOBARIC_TARGET, noTargets, noTargetsIl, true);
+        Assert.assertNotEquals(gated, ISOBARIC_REVERSAL,
+                "with the gate on, that reversal must be rejected - otherwise the switch is inert");
+    }
+
+    @Test
+    public void testAuditSwitchIsDeterministicAcrossRuns() throws IOException {
         // -no_similarity_gate exists to reproduce a pre-fix library byte for byte, which is the
         // regression oracle for "does this generator still match the delivered library?". It must
         // therefore skip I/L rejection too, not just the overlap gate - otherwise the oracle

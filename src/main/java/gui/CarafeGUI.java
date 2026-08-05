@@ -8040,6 +8040,21 @@ public class CarafeGUI extends JFrame {
                 else if (!new File(libDbO).exists())
                     errors.add("- Library protein database file not found.");
 
+                // 3b. Entrapment FASTA, when entrapment is drawn from one. The row is hidden when
+                // the source is Shuffle, and buildEntrapmentFastaCommand keys off that logical
+                // state - so an empty path here does not build a foreign-entrapment library, it
+                // silently builds a SHUFFLED one. That is the same wrong-library-without-warning
+                // failure the logical-state keying exists to prevent, just in the other direction,
+                // so refuse it here rather than let it run.
+                if (includeEntrapmentCheckbox.isSelected() && isEntrapmentFromFasta()) {
+                    String entrapDb = entrapmentDbField.getText().trim();
+                    if (entrapDb.isEmpty())
+                        errors.add("- Entrapment source is set to a FASTA, but no entrapment FASTA "
+                                + "is specified (choose one, or set the source back to Shuffle).");
+                    else if (!new File(entrapDb).exists())
+                        errors.add("- Entrapment FASTA not found: " + entrapDb);
+                }
+
                 // 4. Project MS Files (Workflow 5 only)
                 if (workflowIndex == 4) {
                     if (effectiveProjectFiles.isEmpty())
