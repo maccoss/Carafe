@@ -144,6 +144,23 @@ public class EntrapmentFastaGear {
          * gate exists to remove and should not be searched.</p>
          */
         public boolean similarityGate = true;
+        /**
+         * Refuse to write a manifest that fails {@link EntrapmentPairingValidator#validateQuartets}.
+         *
+         * <p>Default true: a broken pairing is cheaper to fix here than downstream, where it either
+         * crashes a paired FDP estimator or silently mis-scales one. Set false (CLI:
+         * {@code -ignore_pairing_errors}) to downgrade the refusal to a logged warning and write the
+         * manifest anyway.</p>
+         *
+         * <p>The escape hatch exists because these invariants can only really be confirmed at a
+         * scale the unit tests cannot reach - the checks are asserted against small fixtures, but a
+         * real build is 1.4M quartets. Without it, a check that turns out to be wrong about what
+         * the generator guarantees leaves no way to produce a manifest at all until the code is
+         * patched. Deliberately NOT folded into {@code -no_similarity_gate}: that flag changes which
+         * sequences are GENERATED and yields a library that should not be searched, so it is not a
+         * neutral override for a pairing check.</p>
+         */
+        public boolean failOnPairingViolation = true;
         public String entrapmentSuffix = DEFAULT_ENTRAPMENT_SUFFIX;
         public String decoyPrefix = DEFAULT_DECOY_PREFIX;
         public boolean uniqueAccessions = true;
@@ -926,6 +943,11 @@ public class EntrapmentFastaGear {
     }
 
     private static void writeManifest(Config cfg, List<Quartet> kept) throws IOException {
+        // Refuse to emit a pairing a paired FDP estimator cannot consume. Downstream this surfaces
+        // as a crash or a quietly mis-scaled FDP hours into a search; here it costs one pass over
+        // quartets already in memory.
+        EntrapmentPairingValidator.enforce(
+                EntrapmentPairingValidator.validateQuartets(kept), cfg.failOnPairingViolation);
         Cloger.getInstance().logger.info("Writing manifest: " + cfg.manifest);
         File out = new File(cfg.manifest);
         if (out.getParentFile() != null) {

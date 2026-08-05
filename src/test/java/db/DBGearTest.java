@@ -60,6 +60,9 @@ public class DBGearTest {
         Assert.assertTrue(peptides.contains("MPEPTIDEK"), "NoCut must keep the peptide as-is");
         Assert.assertFalse(peptides.contains("PEPTIDEK"),
                 "NoCut must not clip the N-terminal methionine");
+        // Stronger than "the clipped form is absent": nothing extra was minted at all.
+        Assert.assertEquals(peptides.size(), 1,
+                "NoCut on a single peptide must yield exactly that peptide");
     }
 
     @Test
