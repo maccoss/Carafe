@@ -971,6 +971,13 @@ public class AIGear {
                         + "or report a mis-scaled FDP on the result.");
             }
             if (cmd.hasOption("entrapment_ratio")) {
+                // Same guard as -entrapment_db: the ratio only means anything when entrapment is
+                // being generated, so accepting it silently would let a user believe they had
+                // built a thin overlay when they had built no entrapment at all.
+                if (!efc.addEntrapment) {
+                    System.err.println("-entrapment_ratio has no effect without -entrapment");
+                    System.exit(1);
+                }
                 efc.entrapmentRatio = Double.parseDouble(cmd.getOptionValue("entrapment_ratio"));
                 if (efc.entrapmentRatio > 1.0) {
                     System.err.println("-entrapment_ratio cannot exceed 1.0 (one entrapment "
