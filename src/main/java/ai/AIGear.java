@@ -722,6 +722,9 @@ public class AIGear {
         // Peptide-level entrapment FASTA + FDRBench pairing manifest generation (for Osprey).
         options.addOption("build_entrapment_fasta", true, "Build a peptide-level FASTA from the -db protein FASTA (using the configured digest options) and write it to the given path. Run Carafe library generation over this FASTA with -enzyme NoCut so targets and decoys are both predicted.");
         options.addOption("manifest", true, "Output FDRBench 5-column pairing manifest TSV (used with -build_entrapment_fasta and Osprey's --decoy-pairing-manifest).");
+        options.addOption("entrapment_db", true, "Foreign-species protein FASTA to draw entrapment peptides from (e.g. an Arabidopsis proteome), instead of shuffling each target. Each target is paired 1:1 with a unique foreign peptide of matched neutral mass. Requires -entrapment.");
+        options.addOption("entrapment_ratio", true, "Fraction of targets that carry an entrapment peptide, in [0.1, 1.0]. Default 1.0 (every target). A smaller value makes entrapment a thin overlay that perturbs the target search less; the combined FDP estimate is stable down to 0.1. Below 0.1 is rejected as untested.");
+        options.addOption("no_similarity_gate", false, "AUDIT ONLY. Reproduce the pre-gate behaviour: one entrapment shuffle rejected only on an exact collision, and no fragment-overlap check on decoys. Used to prove a rebuilt library differs from an older one only by the gate. The resulting library contains entrapment near-copies of their own targets and should not be searched.");
         options.addOption("entrapment", false, "Include entrapment (p_target/p_decoy) peptides when building the entrapment FASTA. Default off (target+decoy only).");
         options.addOption("no_decoys", false, "Do not add decoy peptides when building the entrapment FASTA. Default is to add decoys.");
         options.addOption("mz_filter", false, "Apply the precursor m/z window filter (-min_pep_mz/-max_pep_mz at charges -min_pep_charge..-max_pep_charge) when building the entrapment FASTA.");
@@ -946,6 +949,41 @@ public class AIGear {
             }
             if (cmd.hasOption("decoy_seed")) {
                 efc.decoySeed = Long.parseLong(cmd.getOptionValue("decoy_seed"));
+            }
+            if (cmd.hasOption("entrapment_db")) {
+                efc.entrapmentSourceFasta = cmd.getOptionValue("entrapment_db");
+                if (!efc.addEntrapment) {
+                    System.err.println("-entrapment_db has no effect without -entrapment");
+                    System.exit(1);
+                }
+            }
+            if (cmd.hasOption("no_similarity_gate")) {
+                efc.similarityGate = false;
+                System.err.println("WARNING: -no_similarity_gate reproduces the pre-gate behaviour "
+                        + "for audit comparison. The resulting library contains entrapment "
+                        + "near-copies of their own targets and should not be searched.");
+            }
+            if (cmd.hasOption("entrapment_ratio")) {
+                efc.entrapmentRatio = Double.parseDouble(cmd.getOptionValue("entrapment_ratio"));
+                if (efc.entrapmentRatio > 1.0) {
+                    System.err.println("-entrapment_ratio cannot exceed 1.0 (one entrapment "
+                            + "peptide per target): " + efc.entrapmentRatio);
+                    System.exit(1);
+                }
+                if (efc.entrapmentRatio < EntrapmentFastaGear.MIN_ENTRAPMENT_RATIO) {
+                    System.err.println(String.format(
+                            "-entrapment_ratio %.4f is below the tested minimum of %.2f.%n"
+                                    + "Ratios down to %.2f are characterised - the combined FDP "
+                                    + "estimate is stable across r = 1, 0.5, 0.25 and 0.1 - but at "
+                                    + "%.2f only ~32 entrapment peptides were accepted at 1%% q, so "
+                                    + "below it the estimate is dominated by counting noise and has "
+                                    + "not been validated.%nIf you have a case that needs a lower "
+                                    + "ratio, raise it so the bound can be widened deliberately.",
+                            efc.entrapmentRatio, EntrapmentFastaGear.MIN_ENTRAPMENT_RATIO,
+                            EntrapmentFastaGear.MIN_ENTRAPMENT_RATIO,
+                            EntrapmentFastaGear.MIN_ENTRAPMENT_RATIO));
+                    System.exit(1);
+                }
             }
             EntrapmentFastaGear.run(efc);
             Cloger.getInstance().logger.info("Entrapment FASTA build finished in "
