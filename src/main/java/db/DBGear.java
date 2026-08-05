@@ -405,8 +405,11 @@ public class DBGear {
      * @param enzyme the enzyme to test
      * @return true if the enzyme is NoCut, false otherwise
      */
+    /** Name of the pass-through pseudo-enzyme registered by {@link #init_enzymes()}. */
+    public static final String NO_CUT_ENZYME_NAME = "NoCut";
+
     public static boolean isNoCutEnzyme(Enzyme enzyme){
-        return enzyme != null && "NoCut".equalsIgnoreCase(enzyme.getName());
+        return enzyme != null && NO_CUT_ENZYME_NAME.equalsIgnoreCase(enzyme.getName());
     }
 
     public static int getEnzymeIndexByName(String enzyme_name){
