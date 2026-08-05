@@ -72,32 +72,54 @@ if ([regex]::Matches($src, $retrainPattern).Count -ne 1) {
 # --- Patch 1: 2nd-pass q-value unset default -> protein-compact. ---
 # Capture the 'if (...)' + whitespace + 'return ' prefix so its formatting/newline is
 # preserved; only the returned constant is swapped. \s* spans the line break on LF or CRLF.
-$unsetDefault = '(if\s*\(\s*string\.IsNullOrWhiteSpace\(\s*raw\s*\)\s*\)\s*return\s+)PASS2_QVALUE_PERCOLATOR;'
+# Idempotent: upstream may already default to protein-compact (pwiz removed the percolator
+# token outright and made protein-compact the unset default). Treat "already correct" as
+# success rather than as a changed-upstream error - the point of this step is that the SHIPPED
+# default is protein-compact, not that this script was the one to set it. Only a value that is
+# neither the old form nor the wanted one is a real "re-verify before building".
+$unsetPrefix = 'if\s*\(\s*string\.IsNullOrWhiteSpace\(\s*raw\s*\)\s*\)\s*return\s+'
+$unsetDefault = "($unsetPrefix)PASS2_QVALUE_PERCOLATOR;"
+$alreadyCompact = "($unsetPrefix)PASS2_QVALUE_PROTEIN_COMPACT;"
 $pass2Hits = [regex]::Matches($src, $unsetDefault)
-if ($pass2Hits.Count -ne 1) {
-    Write-Error ("Expected exactly one unset (IsNullOrWhiteSpace) 'return " +
-        "PASS2_QVALUE_PERCOLATOR;' default in NormalizePass2QValue, found $($pass2Hits.Count). " +
-        "OspreyEnvironment.cs changed upstream; re-verify the 2nd-pass q-value default before building.")
+$compactHits = [regex]::Matches($src, $alreadyCompact)
+if ($pass2Hits.Count -eq 1) {
+    $src = [regex]::Replace($src, $unsetDefault, '${1}PASS2_QVALUE_PROTEIN_COMPACT;')
+    $pass2Action = "patched: percolator -> protein-compact"
+} elseif ($compactHits.Count -eq 1) {
+    $pass2Action = "already protein-compact upstream, left unchanged"
+} else {
+    Write-Error ("Could not establish the unset (IsNullOrWhiteSpace) 2nd-pass q-value default in " +
+        "NormalizePass2QValue: found $($pass2Hits.Count) 'return PASS2_QVALUE_PERCOLATOR;' and " +
+        "$($compactHits.Count) 'return PASS2_QVALUE_PROTEIN_COMPACT;'. OspreyEnvironment.cs changed " +
+        "upstream in a way this script does not recognize; re-verify the 2nd-pass q-value default " +
+        "before building.")
     exit 1
 }
-$src = [regex]::Replace($src, $unsetDefault, '${1}PASS2_QVALUE_PROTEIN_COMPACT;')
 
 # --- Patch 2: learned peak pick opt-in -> default on (OSPREY_PICK_LDA=0 still disables). ---
+# Idempotent for the same reason as patch 1: upstream now ships IsNotZero (default ON).
 $pickLda = '(PickLda\s*=\s*)IsSetAndNotZero(\(\s*@?"OSPREY_PICK_LDA"\s*\))'
+$pickAlreadyOn = 'PickLda\s*=\s*IsNotZero\(\s*@?"OSPREY_PICK_LDA"\s*\)'
 $pickHits = [regex]::Matches($src, $pickLda)
-if ($pickHits.Count -ne 1) {
-    Write-Error ("Expected exactly one 'PickLda = IsSetAndNotZero(""OSPREY_PICK_LDA"")', found " +
-        "$($pickHits.Count). The peak-pick flag changed upstream (it was OSPREY_PICK_LEGACY before " +
-        "pwiz#4446); re-verify which pick the installer should ship before building.")
+$pickOnHits = [regex]::Matches($src, $pickAlreadyOn)
+if ($pickHits.Count -eq 1) {
+    $src = [regex]::Replace($src, $pickLda, '${1}IsNotZero${2}')
+    $pickAction = "patched: opt-in -> ON"
+} elseif ($pickOnHits.Count -eq 1) {
+    $pickAction = "already ON upstream, left unchanged"
+} else {
+    Write-Error ("Could not establish the OSPREY_PICK_LDA default: found $($pickHits.Count) " +
+        "'PickLda = IsSetAndNotZero(...)' and $($pickOnHits.Count) 'PickLda = IsNotZero(...)'. " +
+        "The peak-pick flag changed upstream (it was OSPREY_PICK_LEGACY before pwiz#4446); " +
+        "re-verify which pick the installer should ship before building.")
     exit 1
 }
-$src = [regex]::Replace($src, $pickLda, '${1}IsNotZero${2}')
 
 # Write UTF-8 without BOM; the regex replaces preserved the original newlines.
 [System.IO.File]::WriteAllText($OspreyEnvPath, $src, (New-Object System.Text.UTF8Encoding($false)))
 
-Write-Host "Patched OSPREY_PASS2_QVALUE unset default: percolator -> protein-compact"
+Write-Host "OSPREY_PASS2_QVALUE unset default -> protein-compact ($pass2Action)"
 Write-Host "  (frozen 1st-pass weights + protein-stratum competition, no retrain)"
-Write-Host "Patched OSPREY_PICK_LDA default: opt-in -> ON (learned resolution-keyed pick)"
+Write-Host "OSPREY_PICK_LDA default -> ON, learned resolution-keyed pick ($pickAction)"
 Write-Host "  (set OSPREY_PICK_LDA=0 at run time to fall back to the legacy product pick)"
 Write-Host "Verified OSPREY_PROTEIN_COMPACT_RETRAIN still opt-in (2nd pass stays frozen)"
